@@ -199,9 +199,16 @@ export function formatChangedFilesForPrompt(
     return `# Changed file overview (0 reviewable files)\n${excludedNote || "# ... every changed file was excluded by exclude_paths."}`;
   }
 
-  // Rebuild the diff from the SURVIVING patches. Reusing the raw `diff` string
-  // here would re-admit every excluded file through the full-diff path below.
-  const keptDiff = files.map((file) => file.patch).join("\n");
+  // Rebuild the diff from the SURVIVING patches ONLY when something was actually
+  // excluded. Reusing the raw `diff` string after an exclusion would re-admit every
+  // excluded file through the full-diff path below — but reconstructing it when
+  // NOTHING was excluded is also wrong: the reconstruction is not byte-identical to
+  // the input (it drops any preamble and normalizes inter-file newlines), so the
+  // emitted prompt would stop ending with the verbatim diff. Downstream consumers
+  // detect the full-diff regime structurally, by exactly that relationship, so an
+  // unconditional rebuild silently makes the full regime undetectable for every
+  // repository — including the ones that never set exclude_paths at all.
+  const keptDiff = excluded.length === 0 ? diff : files.map((file) => file.patch).join("\n");
   const overview = [formatFileOverview(files), excludedNote].filter(Boolean).join("\n");
   const fullDiffWithOverview = `${overview}\n\n# Full diff\n${keptDiff}`;
   if (fullDiffWithOverview.length <= maxChars) {

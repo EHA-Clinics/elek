@@ -182,7 +182,7 @@ async function run(): Promise<void> {
         configBaseRef,
         (message) => console.warn(`[config] ${message}`),
       )
-      : { config: { ignorePaths: [], excludePaths: [], instructions: [] }, loaded: false }
+      : { config: { ignorePaths: [], excludePaths: [], prioritySourceExtensions: [], instructions: [] }, loaded: false }
     : undefined;
   const repoConfig = baseConfig
     ? mergeBasePolicyWithWorkspaceGuidance(baseConfig.config, workspaceConfig)

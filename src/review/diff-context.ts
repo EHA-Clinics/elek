@@ -14,6 +14,18 @@ export interface PromptPackingOptions {
    * which only asks the model to suppress findings and still transmits the file.
    */
   excludePaths?: readonly string[];
+  /**
+   * Extra file extensions (without the dot) to treat as priority-0 production
+   * source, on top of the built-in list. Opt-in and empty by default.
+   *
+   * The built-in list is language source only, so an infrastructure repo whose
+   * real product is `.tf` — or a frontend whose product is `.vue` — has NO
+   * priority-0 files at all. Everything it ships is priority 2, ordered behind
+   * any language file in the diff and unable to fail a coverage check that only
+   * considers priority 0. This lets such a repo opt its own source in without
+   * changing the default for anyone else.
+   */
+  productionExtensions?: readonly string[];
 }
 
 const MIN_FILE_SLICE_CHARS = 700;
@@ -196,7 +208,7 @@ export function formatChangedFilesForPrompt(
     return fullDiffWithOverview;
   }
 
-  const sorted = [...files].sort(comparePromptPriority);
+  const sorted = [...files].sort(comparePromptPriorityWith(options.productionExtensions));
   const remainingBudget = Math.max(0, maxChars - overview.length - 1_200);
   const perFileBudget = Math.max(
     MIN_FILE_SLICE_CHARS,
@@ -267,22 +279,34 @@ function formatFileOverview(files: ChangedFilePatch[]): string {
   return lines.join("\n");
 }
 
-function comparePromptPriority(a: ChangedFilePatch, b: ChangedFilePatch): number {
-  const score = promptPriority(a) - promptPriority(b);
-  if (score !== 0) return score;
-  const churn = (b.additions + b.deletions) - (a.additions + a.deletions);
-  if (churn !== 0) return churn;
-  return a.path.localeCompare(b.path);
+function comparePromptPriorityWith(
+  extraExtensions: readonly string[] | undefined,
+): (a: ChangedFilePatch, b: ChangedFilePatch) => number {
+  return (a, b) => {
+    const score = promptPriority(a, extraExtensions) - promptPriority(b, extraExtensions);
+    if (score !== 0) return score;
+    const churn = (b.additions + b.deletions) - (a.additions + a.deletions);
+    if (churn !== 0) return churn;
+    return a.path.localeCompare(b.path);
+  };
 }
 
-function promptPriority(file: ChangedFilePatch): number {
+export function promptPriority(
+  file: ChangedFilePatch,
+  extraExtensions?: readonly string[],
+): number {
   const nonCode = isDocsOrWorkflow(file.path);
   if (file.status === "deleted" && nonCode) return 6;
   if (file.status === "deleted") return 5;
-  if (isProductionCode(file.path)) return 0;
+  if (isProductionCode(file.path, extraExtensions)) return 0;
   if (isTestCode(file.path)) return 1;
   if (nonCode) return 4;
   return 2;
+}
+
+/** Normalize `.tf` / `tf` / `TF` to a bare lowercase extension. */
+function normalizeExtension(value: string): string {
+  return value.trim().replace(/^\./, "").toLowerCase();
 }
 
 function isDocsOrWorkflow(path: string): boolean {
@@ -300,10 +324,17 @@ function isDocsOrWorkflow(path: string): boolean {
   );
 }
 
-function isProductionCode(path: string): boolean {
+function isProductionCode(path: string, extraExtensions?: readonly string[]): boolean {
   const lower = path.toLowerCase();
   if (isTestCode(lower) || isDocsOrWorkflow(lower)) return false;
-  return /\.(ts|tsx|js|jsx|mjs|cjs|go|rs|py|rb|java|kt|swift|c|cc|cpp|h|hpp|cs|php|ex|exs|erl|hrl|sql)$/.test(lower);
+  if (/\.(ts|tsx|js|jsx|mjs|cjs|go|rs|py|rb|java|kt|swift|c|cc|cpp|h|hpp|cs|php|ex|exs|erl|hrl|sql)$/.test(lower)) {
+    return true;
+  }
+  if (!extraExtensions || extraExtensions.length === 0) return false;
+  const dot = lower.lastIndexOf(".");
+  if (dot < 0) return false;
+  const ext = lower.slice(dot + 1);
+  return extraExtensions.some((candidate) => normalizeExtension(candidate) === ext);
 }
 
 function isTestCode(path: string): boolean {

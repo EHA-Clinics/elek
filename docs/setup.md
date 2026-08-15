@@ -232,6 +232,7 @@ Supported keys:
 | `severity_threshold` | Prompt-level reviewer threshold: `critical`, `important`, or `minor` |
 | `knowledge_paths` | Repo-local docs or directories to include as bounded review context |
 | `ignore_paths` | Skip a finding only when all of its evidence lies inside these paths; still surface issues that leak impact outside them. Prompt guidance only — matching files are still packed into the prompt and still sent to the model |
+| `priority_source_extensions` | Extra file extensions (e.g. `tf`, `vue`) to treat as priority-0 production source when ordering the prompt. Opt-in and empty by default; the built-in list covers language source only, so an infrastructure or single-file-component repo otherwise has no priority-0 files |
 | `exclude_paths` | Drop matching files from the packed diff entirely — contents and overview entry alike. Unlike `ignore_paths`, these files are never transmitted, so the budget they would have consumed is reclaimed for reviewable code |
 | `instructions` | Extra repo-specific review policy inserted into every prompt |
 
@@ -249,7 +250,7 @@ dropping repo policy.
 Security note: on pull requests, elek loads policy and guidance fields
 (`review_strategy`, `review_models`, `review_lenses`, `advisor_model`,
 `validator_model`, `cost_rates`, `max_cost_usd`,
-`severity_threshold`, `knowledge_paths`, `ignore_paths`, `exclude_paths`, and `instructions`)
+`severity_threshold`, `knowledge_paths`, `ignore_paths`, `exclude_paths`, `priority_source_extensions`, and `instructions`)
 from the base branch when available. A pull request cannot weaken its own
 review policy. Each run logs the loaded config source plus effective
 strategy/model/severity choices.

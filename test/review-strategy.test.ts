@@ -476,6 +476,7 @@ describe("review strategy", () => {
         severityThreshold: "important",
         ignorePaths: ["docs/**"],
         excludePaths: [],
+        prioritySourceExtensions: [],
         instructions: ["Treat auth changes as security-sensitive."],
       },
     });
@@ -561,6 +562,7 @@ describe("review strategy", () => {
         severityThreshold: "important",
         ignorePaths: ["docs/**"],
         excludePaths: [],
+        prioritySourceExtensions: [],
         instructions: ["Treat auth changes as security-sensitive."],
       },
     });
@@ -684,7 +686,7 @@ describe("diff prompt budget reporting", () => {
       userRequest: "",
       lens,
       modelLabel: "deepseek/deepseek-v4-pro",
-      repoConfig: { ignorePaths: [], excludePaths: [".planning/**"], instructions: [] },
+      repoConfig: { ignorePaths: [], excludePaths: [".planning/**"], prioritySourceExtensions: [], instructions: [] },
       onBudget: (report) => reports.push(report),
     });
 
@@ -708,7 +710,7 @@ describe("diff prompt budget reporting", () => {
         userRequest: "",
         lens,
         modelLabel,
-        repoConfig: { ignorePaths: [], excludePaths: [], instructions: [] },
+        repoConfig: { ignorePaths: [], excludePaths: [], prioritySourceExtensions: [], instructions: [] },
         onBudget: (report) => seen.push(report.diffPromptBudgetChars),
       });
     }

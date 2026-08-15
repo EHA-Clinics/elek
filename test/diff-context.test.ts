@@ -6,6 +6,7 @@ import {
   globToRegExp,
   modelInputBudgetChars,
   parseUnifiedDiffFiles,
+  promptPriority,
 } from "../src/review/diff-context";
 
 describe("diff prompt context", () => {
@@ -237,5 +238,66 @@ describe("exclude_paths filtering", () => {
     expect(formatChangedFilesForPrompt(diff, 320_000, { excludePaths: [] })).toBe(
       formatChangedFilesForPrompt(diff, 320_000),
     );
+  });
+});
+
+describe("priority_source_extensions (opt-in)", () => {
+  const file = (path: string) => ({
+    path,
+    oldPath: path,
+    status: "modified" as const,
+    additions: 1,
+    deletions: 0,
+    patch: `diff --git a/${path} b/${path}`,
+  });
+
+  it("treats an infra repo's real source as priority 2 by DEFAULT", () => {
+    // The motivating problem: a pure-Terraform repo ships nothing the built-in
+    // list calls production source, so it has NO priority-0 files at all and a
+    // coverage check that only considers priority 0 can essentially never fail.
+    expect(promptPriority(file("infra/main.tf"))).toBe(2);
+    expect(promptPriority(file("deploy/values.yaml"))).toBe(2);
+    expect(promptPriority(file("app/Component.vue"))).toBe(2);
+    // Language source is priority 0 with or without the opt-in.
+    expect(promptPriority(file("src/app.ts"))).toBe(0);
+  });
+
+  it("promotes only the extensions a repo opts into", () => {
+    expect(promptPriority(file("infra/main.tf"), ["tf", "tfvars"])).toBe(0);
+    expect(promptPriority(file("infra/vars.tfvars"), ["tf", "tfvars"])).toBe(0);
+    // Not opted in — unchanged.
+    expect(promptPriority(file("deploy/values.yaml"), ["tf", "tfvars"])).toBe(2);
+  });
+
+  it("accepts extensions with or without a leading dot, case-insensitively", () => {
+    expect(promptPriority(file("infra/main.tf"), [".TF"])).toBe(0);
+    expect(promptPriority(file("infra/MAIN.TF"), ["tf"])).toBe(0);
+  });
+
+  it("never promotes tests or docs, even when their extension is opted in", () => {
+    // The test/docs checks run BEFORE the extension check, so opting an
+    // extension in cannot smuggle a test or doc file into priority 0.
+    expect(promptPriority(file("infra/tests/main.tf"), ["tf"])).toBe(1);
+    expect(promptPriority(file("docs/notes.md"), ["md"])).toBe(4);
+    // Pre-existing upstream quirk, asserted so the opt-in is not blamed for it:
+    // isTestCode matches "/tests/", so a REPO-ROOT tests/ directory is not
+    // recognised as test code and an opted-in extension there does reach
+    // priority 0. Unchanged by this patch; true of .ts files today.
+    expect(promptPriority(file("tests/main.ts"))).toBe(0);
+    expect(promptPriority(file("tests/main.tf"), ["tf"])).toBe(0);
+  });
+
+  it("keeps deleted-file priorities unchanged", () => {
+    const deleted = { ...file("infra/main.tf"), status: "deleted" as const };
+    expect(promptPriority(deleted, ["tf"])).toBe(5);
+  });
+
+  it("orders opted-in source ahead of other files in the packed prompt", () => {
+    const mk = (path: string, body: string) =>
+      [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, "@@ -1,1 +1,2 @@", " ctx", `+${body}`].join("\n");
+    const diff = [mk("z-notes.txt", "X".repeat(9_000)), mk("infra/main.tf", "TF_TOKEN")].join("\n");
+    const budget = 9_500;
+    const withOptIn = formatChangedFilesForPrompt(diff, budget, { productionExtensions: ["tf"] });
+    expect(withOptIn).toContain("TF_TOKEN");
   });
 });

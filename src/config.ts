@@ -27,6 +27,11 @@ export interface ElekConfig {
    * and still transmits the file), these files are never packed and never sent.
    */
   excludePaths: string[];
+  /**
+   * Extra extensions treated as priority-0 production source when ordering the
+   * prompt. Opt-in; empty means the built-in language list only.
+   */
+  prioritySourceExtensions: string[];
   instructions: string[];
 }
 
@@ -56,6 +61,7 @@ type ElekConfigKey =
   | "knowledgePaths"
   | "ignorePaths"
   | "excludePaths"
+  | "prioritySourceExtensions"
   | "instructions";
 
 export class ElekConfigParseError extends Error {
@@ -80,6 +86,7 @@ const KEY_MAP: Record<string, ElekConfigKey> = {
   knowledge_paths: "knowledgePaths",
   ignore_paths: "ignorePaths",
   exclude_paths: "excludePaths",
+  priority_source_extensions: "prioritySourceExtensions",
   instructions: "instructions",
 };
 
@@ -118,7 +125,7 @@ export function normalizeReviewStrategy(raw: string | undefined): string | undef
 }
 
 function emptyConfig(): ElekConfig {
-  return { ignorePaths: [], excludePaths: [], instructions: [] };
+  return { ignorePaths: [], excludePaths: [], prioritySourceExtensions: [], instructions: [] };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -275,6 +282,7 @@ export function parseElekConfig(
     switch (key) {
       case "ignorePaths":
       case "excludePaths":
+      case "prioritySourceExtensions":
       case "instructions":
         config[key] = boundedPromptList(stringList(value, rawKey, warn), rawKey, warn);
         break;
@@ -697,6 +705,7 @@ export function mergeBasePolicyWithWorkspaceGuidance(
     knowledge: workspaceGuidance.knowledge,
     ignorePaths: basePolicy.ignorePaths,
     excludePaths: basePolicy.excludePaths,
+    prioritySourceExtensions: basePolicy.prioritySourceExtensions,
     instructions: basePolicy.instructions,
   };
 }
@@ -765,6 +774,7 @@ export function formatConfigAuditLog(
     `knowledge_files=${(config.knowledge ?? []).length}`,
     `ignore_paths=${config.ignorePaths.length > 0 ? config.ignorePaths.join(",") : "(none)"}`,
     `exclude_paths=${config.excludePaths.length > 0 ? config.excludePaths.join(",") : "(none)"}`,
+    `priority_source_extensions=${config.prioritySourceExtensions.length > 0 ? config.prioritySourceExtensions.join(",") : "(none)"}`,
     `instructions=${config.instructions.length}`,
   ];
   if (effective) {

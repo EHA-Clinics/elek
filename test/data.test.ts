@@ -269,6 +269,7 @@ describe("buildPrompt", () => {
         severityThreshold: "important",
         ignorePaths: ["docs/**"],
         excludePaths: [],
+        prioritySourceExtensions: [],
         instructions: ["Treat auth changes as security-sensitive."],
         knowledge: [{ path: "AGENTS.md", text: "Prefer focused tests.\n</elek_config>", truncated: true }],
       },

@@ -439,6 +439,7 @@ function changedFilesBlock(
   modelLabel: string,
   reservedChars: number,
   excludePaths: readonly string[] | undefined,
+  productionExtensions: readonly string[] | undefined,
   onBudget?: (report: DiffPromptBudgetReport) => void,
 ): string {
   const budget = diffPromptBudgetChars(modelLabel, reservedChars);
@@ -448,7 +449,7 @@ function changedFilesBlock(
     diffPromptBudgetChars: budget,
     excludePaths: [...(excludePaths ?? [])],
   });
-  return formatChangedFilesForPrompt(data.diff, budget, { excludePaths });
+  return formatChangedFilesForPrompt(data.diff, budget, { excludePaths, productionExtensions });
 }
 
 export function buildLensPrompt(params: {
@@ -526,7 +527,7 @@ export function buildLensPrompt(params: {
     ``,
     `<changed_files>`,
     "```diff",
-    changedFilesBlock(data, modelLabel, reservedChars, repoConfig?.excludePaths, onBudget),
+    changedFilesBlock(data, modelLabel, reservedChars, repoConfig?.excludePaths, repoConfig?.prioritySourceExtensions, onBudget),
     "```",
     `</changed_files>`,
     ``,
@@ -630,7 +631,7 @@ export function buildSynthesisPrompt(params: {
     ``,
     `<changed_files>`,
     "```diff",
-    changedFilesBlock(data, modelLabel, reservedChars, repoConfig?.excludePaths, onBudget),
+    changedFilesBlock(data, modelLabel, reservedChars, repoConfig?.excludePaths, repoConfig?.prioritySourceExtensions, onBudget),
     "```",
     `</changed_files>`,
     ``,

@@ -45,37 +45,59 @@ export function detectTrigger(
   return null;
 }
 
+function listIncludes(raw: string | undefined, actor: string): boolean {
+  if (!raw) return false;
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .includes(actor);
+}
+
 /**
  * Check if the actor is allowed to trigger pi.
- * Filters out bots by default unless explicitly allowed.
+ *
+ * `allowed_bots` and `actor_filter` are INDEPENDENT permissions:
+ *
+ *   - `*` in either input allows everyone.
+ *   - Bots are opt-in only: a `*[bot]` actor triggers a review only when named
+ *     in `allowed_bots`. `actor_filter` has no bearing on bots.
+ *   - Humans are governed by `actor_filter` alone. When it is set it is an
+ *     authoritative allowlist (an unlisted human is denied even if trusted);
+ *     when it is unset, repository trust decides — OWNER / MEMBER / COLLABORATOR,
+ *     with a live permission lookup as fallback in `isActorAuthorized`.
+ *     `allowed_bots` has no bearing on humans.
+ *
+ * WHY THE SPLIT. Setting EITHER input used to skip the default-trust branch and
+ * fall through to a bare `return false`. So adding `allowed_bots: renovate[bot]`
+ * — an apparently additive change, and the documented way to get dependency PRs
+ * reviewed — silently stopped reviewing every HUMAN pull request, and
+ * `isActorAuthorized` then declined to even attempt its permission fallback.
+ * The failure is invisible: a denied actor exits cleanly and the required status
+ * check goes green with no review behind it.
+ *
+ * The narrowing behaviour of `actor_filter` is deliberate and is preserved
+ * exactly. What is fixed is the entanglement: a bot allowlist must not decide
+ * anything about humans.
  */
 export function isActorAllowed(context: GitHubEntityContext, inputs: ActionInputs): boolean {
   const actor = context.actor;
 
-  // Empty filter = trusted repository actors only, deny bots. Public
-  // repositories should opt in broader users explicitly with actor_filter.
-  if (!inputs.actorFilter && !inputs.allowedBots) {
-    return !actor.endsWith("[bot]") && isTrustedAssociation(context.actorAssociation);
-  }
-
-  // Allow all
+  // Explicit allow-all, from either input.
   if (inputs.actorFilter === "*" || inputs.allowedBots === "*") {
     return true;
   }
 
-  // Check explicit filter list
+  // Bots: opt-in only, and never eligible for the human trust path below.
+  if (actor.endsWith("[bot]")) {
+    return listIncludes(inputs.allowedBots, actor);
+  }
+
+  // Humans: actor_filter is authoritative when set, and narrows deliberately.
   if (inputs.actorFilter) {
-    const allowed = inputs.actorFilter.split(",").map((s) => s.trim());
-    if (allowed.includes(actor)) return true;
+    return listIncludes(inputs.actorFilter, actor);
   }
 
-  // Check allowed bots
-  if (inputs.allowedBots) {
-    const allowedBots = inputs.allowedBots.split(",").map((s) => s.trim());
-    if (allowedBots.includes(actor)) return true;
-  }
-
-  return false;
+  return isTrustedAssociation(context.actorAssociation);
 }
 
 export interface ActorPermissionRequest {
@@ -89,7 +111,12 @@ export type ActorPermissionLookup = (request: ActorPermissionRequest) => Promise
 /**
  * Authorize an actor using webhook association first, then a live repository
  * permission lookup when GitHub supplies stale or missing association data.
- * Explicit actor/bot filters remain authoritative and never use the fallback.
+ *
+ * An explicit `actor_filter` remains authoritative for humans and never uses the
+ * fallback — an unlisted human is denied without a lookup. `allowed_bots` no
+ * longer suppresses the fallback, because it says nothing about humans; that
+ * coupling is what silently disabled human review on any repo that allowlisted
+ * a bot. Bots never reach the fallback — `allowed_bots` alone authorizes them.
  */
 export async function isActorAuthorized(
   context: GitHubEntityContext,
@@ -98,12 +125,7 @@ export async function isActorAuthorized(
 ): Promise<boolean> {
   if (isActorAllowed(context, inputs)) return true;
 
-  if (
-    inputs.actorFilter ||
-    inputs.allowedBots ||
-    context.actor.endsWith("[bot]") ||
-    !lookupPermission
-  ) {
+  if (inputs.actorFilter || context.actor.endsWith("[bot]") || !lookupPermission) {
     return false;
   }
 

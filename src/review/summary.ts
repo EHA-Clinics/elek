@@ -1,4 +1,5 @@
 import type { GitHubEntityContext, PiRunResult } from "../types.js";
+import type { DiffPromptBudgetReport } from "./strategy.js";
 import type { ReviewCost, ReviewCostTotal } from "./cost.js";
 import type { PostSummary } from "../entrypoints/post-buffered.js";
 import { uniqueFindingId, type ParsedReviewFinding } from "./findings.js";
@@ -37,6 +38,14 @@ export interface ReviewSummaryInput {
   costTotal: ReviewCostTotal;
   runs: ReviewRunMetric[];
   findings?: ParsedReviewFinding[];
+  /**
+   * The diff budget each prompt actually received. Additive and optional, so
+   * `version` stays 1 — no existing consumer breaks, and a consumer that wants
+   * these values must detect them by presence anyway to tolerate older refs.
+   */
+  promptBudgets?: DiffPromptBudgetReport[];
+  /** Lens IDs that failed once and were retried. */
+  retriedLensIds?: string[];
 }
 
 export function metricFromPiRun(
@@ -114,6 +123,8 @@ export function buildReviewSummary(input: ReviewSummaryInput) {
       runs: input.costTotal.runs.map((run) => costRunSummary(run)),
     },
     modelRuns: input.runs,
+    promptBudgets: input.promptBudgets ?? [],
+    retriedLensIds: input.retriedLensIds ?? [],
   };
 }
 

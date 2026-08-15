@@ -58,6 +58,8 @@ import {
   resolveReviewPlan,
   resolveReviewPlanSupport,
   selectReviewPlanWithinBudget,
+  shouldRetryLens,
+  type DiffPromptBudgetReport,
   type ReviewJob,
   type ReviewPlan,
 } from "../review/strategy.js";
@@ -371,6 +373,10 @@ async function run(): Promise<void> {
   };
 
   const lensPromptCache = new Map<string, string>();
+  // Ground truth for how much diff each prompt was actually given, reported by
+  // the packer rather than re-derived by any consumer. Keyed so a cached prompt
+  // does not double-report.
+  const promptBudgetByKey = new Map<string, DiffPromptBudgetReport>();
   const lensPromptFor = (job: ReviewJob): string => {
     const key = `${job.lens.id}\0${job.model.label}`;
     const cached = lensPromptCache.get(key);
@@ -382,6 +388,7 @@ async function run(): Promise<void> {
       modelLabel: job.model.label,
       repoConfig: effectiveRepoConfig,
       includeDiscussion: false,
+      onBudget: (report) => promptBudgetByKey.set(key, { ...report, lensId: job.lens.id }),
     });
     lensPromptCache.set(key, lensPrompt);
     return lensPrompt;
@@ -465,6 +472,7 @@ async function run(): Promise<void> {
 
   const runCosts: ReviewCost[] = [];
   const runMetrics: ReviewRunMetric[] = [];
+  let retriedLensIdsForSummary: string[] = [];
 
   let finalInputs = piInputs;
   if (useReviewPlan) {
@@ -522,23 +530,63 @@ async function run(): Promise<void> {
           tools: lensTools,
           mode: "review",
         };
-        const lensResult = await runPi(
+        // A required lens failure fails the whole review (fail closed). Provider
+        // faults are transient often enough that a single unlucky 5xx would
+        // otherwise red a PR that has nothing wrong with it, so give each
+        // required lens exactly ONE retry first. A lens that fails twice is
+        // treated as a real failure and still fails the review — this narrows
+        // the flake window, it does not soften the gate.
+        const attempts: PiRunResult[] = [];
+        let lensResult = await runPi(
           lensPrompt,
           lensInputs,
           undefined,
           false,
           { promptName: `lens-${job.lens.id}` },
         );
+        attempts.push(lensResult);
+        let retried = false;
+        if (shouldRetryLens({
+          role: job.role,
+          conclusion: lensResult.conclusion,
+          attemptsSoFar: attempts.length,
+        })) {
+          retried = true;
+          console.warn(`[${job.lens.id}] attempt 1 failed — retrying once before failing the review`);
+          const retryResult = await runPi(
+            lensPrompt,
+            lensInputs,
+            undefined,
+            false,
+            { promptName: `lens-${job.lens.id}-retry` },
+          );
+          attempts.push(retryResult);
+          console.log(
+            retryResult.conclusion === "success"
+              ? `[${job.lens.id}] retry succeeded`
+              : `[${job.lens.id}] retry also failed — failing the review closed`,
+          );
+          lensResult = retryResult;
+        }
         const lensOutput = sanitize(lensResult.output);
         console.log(
           `[${job.lens.id}] ${lensResult.conclusion} · ${lensOutput.substring(0, 180)}`,
         );
-        return { job, lensResult, lensOutput };
+        return { job, lensResult, lensOutput, attempts, retried };
       }),
     );
 
-    for (const { job, lensResult } of lensRuns) {
-      runCosts.push(costFromPiResult(lensResult));
+    retriedLensIdsForSummary = lensRuns.filter(({ retried }) => retried).map(({ job }) => job.lens.id);
+
+    for (const { job, lensResult, attempts } of lensRuns) {
+      // Charge for EVERY attempt — a retry spends real money, and a cost report
+      // that hides it would understate the run.
+      for (const attempt of attempts) {
+        runCosts.push(costFromPiResult(attempt));
+      }
+      // Report ONE metric per lens (the decisive attempt), so the per-lens shape
+      // downstream consumers rely on stays 1:1 with the council. The discarded
+      // attempt is still visible via retriedLensIds and the cost runs.
       runMetrics.push(metricFromPiRun(lensResult, job.role || "reviewer", {
         lensId: job.lens.id,
         lensTitle: job.lens.title,
@@ -874,6 +922,8 @@ async function run(): Promise<void> {
     costTotal,
     runs: runMetrics,
     findings: parsedFindings,
+    promptBudgets: [...promptBudgetByKey.values()],
+    retriedLensIds: retriedLensIdsForSummary,
   });
   const reviewSummaryJson = JSON.stringify(reviewSummary);
   const reviewSummaryFileJson = JSON.stringify(reviewSummary, null, 2);

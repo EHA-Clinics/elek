@@ -50,6 +50,27 @@ export function failedRequiredReviewLensIds(
     .map(({ job }) => job.lens.id);
 }
 
+/** A required lens gets one retry before the review fails closed. */
+export const MAX_LENS_ATTEMPTS = 2;
+
+/**
+ * Whether a failed lens run should be retried.
+ *
+ * Only REQUIRED lenses retry (a validator-review failure is already tolerated
+ * by failedRequiredReviewLensIds), and only once. This narrows the window in
+ * which a single transient provider fault reds an otherwise healthy PR; it does
+ * not soften the gate, because a lens that fails twice still fails the review.
+ */
+export function shouldRetryLens(params: {
+  role?: ReviewJob["role"];
+  conclusion: "success" | "failure";
+  attemptsSoFar: number;
+}): boolean {
+  if (params.conclusion !== "failure") return false;
+  if (params.role === "validator-review") return false;
+  return params.attemptsSoFar < MAX_LENS_ATTEMPTS;
+}
+
 export interface BudgetPlanEvent {
   level: "log" | "warn";
   message: string;
@@ -390,17 +411,44 @@ export function selectReviewPlanWithinBudget(args: {
   return { plan, support, events };
 }
 
+/**
+ * What the packer was ACTUALLY given for one prompt.
+ *
+ * Reported rather than recomputed. The AI-review coverage gate measures how
+ * much of the diff a reviewer saw, and previously re-derived this budget from
+ * its own copy of the constants — which silently desynced the moment the budget
+ * became per-model and reservation-aware, in the dangerous direction: the gate
+ * assumed a larger window than the reviewer had, so it could certify a review as
+ * COMPLETE while the reviewer was starved. Emitting the real numbers removes the
+ * re-derivation instead of asking the gate to keep a second copy in sync.
+ */
+export interface DiffPromptBudgetReport {
+  /** Set by the caller so a consumer can map a budget back to its lens. */
+  lensId?: string;
+  modelLabel: string;
+  /** Chars reserved for body, comments, config block and user request. */
+  reservedChars: number;
+  /** Chars actually handed to formatChangedFilesForPrompt as maxChars. */
+  diffPromptBudgetChars: number;
+  /** exclude_paths in effect for this prompt. */
+  excludePaths: string[];
+}
+
 function changedFilesBlock(
   data: GitHubData,
   modelLabel: string,
   reservedChars: number,
   excludePaths: readonly string[] | undefined,
+  onBudget?: (report: DiffPromptBudgetReport) => void,
 ): string {
-  return formatChangedFilesForPrompt(
-    data.diff,
-    diffPromptBudgetChars(modelLabel, reservedChars),
-    { excludePaths },
-  );
+  const budget = diffPromptBudgetChars(modelLabel, reservedChars);
+  onBudget?.({
+    modelLabel,
+    reservedChars,
+    diffPromptBudgetChars: budget,
+    excludePaths: [...(excludePaths ?? [])],
+  });
+  return formatChangedFilesForPrompt(data.diff, budget, { excludePaths });
 }
 
 export function buildLensPrompt(params: {
@@ -410,8 +458,9 @@ export function buildLensPrompt(params: {
   modelLabel: string;
   repoConfig?: ElekConfig;
   includeDiscussion?: boolean;
+  onBudget?: (report: DiffPromptBudgetReport) => void;
 }): string {
-  const { data, userRequest, lens, modelLabel, repoConfig, includeDiscussion = true } = params;
+  const { data, userRequest, lens, modelLabel, repoConfig, includeDiscussion = true, onBudget } = params;
   const isPR = data.type === "pr";
   const entityLabel = isPR ? "pull request" : "issue";
   const configBlock = repoConfig ? formatConfigPromptBlock(repoConfig) : [];
@@ -477,7 +526,7 @@ export function buildLensPrompt(params: {
     ``,
     `<changed_files>`,
     "```diff",
-    changedFilesBlock(data, modelLabel, reservedChars, repoConfig?.excludePaths),
+    changedFilesBlock(data, modelLabel, reservedChars, repoConfig?.excludePaths, onBudget),
     "```",
     `</changed_files>`,
     ``,
@@ -508,8 +557,9 @@ export function buildSynthesisPrompt(params: {
   commentId?: number;
   reports: Array<{ lens: ReviewLens; modelLabel: string; output: string; conclusion: "success" | "failure" }>;
   repoConfig?: ElekConfig;
+  onBudget?: (report: DiffPromptBudgetReport) => void;
 }): string {
-  const { data, userRequest, modelLabel, jobRunLink, commentId, reports, repoConfig } = params;
+  const { data, userRequest, modelLabel, jobRunLink, commentId, reports, repoConfig, onBudget } = params;
   const publicModelLabel = params.publicModelLabel?.trim() || modelLabel;
   const configBlock = repoConfig ? formatConfigPromptBlock(repoConfig) : [];
   const reportBlock = reports
@@ -580,7 +630,7 @@ export function buildSynthesisPrompt(params: {
     ``,
     `<changed_files>`,
     "```diff",
-    changedFilesBlock(data, modelLabel, reservedChars, repoConfig?.excludePaths),
+    changedFilesBlock(data, modelLabel, reservedChars, repoConfig?.excludePaths, onBudget),
     "```",
     `</changed_files>`,
     ``,

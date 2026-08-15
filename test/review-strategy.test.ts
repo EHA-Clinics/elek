@@ -11,6 +11,8 @@ import {
   resolveReviewPlanSupport,
   resolveReviewStrategy,
   selectReviewPlanWithinBudget,
+  shouldRetryLens,
+  MAX_LENS_ATTEMPTS,
 } from "../src/review/strategy";
 import type { GitHubData } from "../src/github/data";
 import type { ActionInputs } from "../src/types";
@@ -639,3 +641,78 @@ function reviewCost(costUsd: number, source: ReviewCost["source"] = "builtin"): 
     source,
   };
 }
+
+describe("shouldRetryLens", () => {
+  it("retries a failed required lens exactly once", () => {
+    expect(shouldRetryLens({ role: "reviewer", conclusion: "failure", attemptsSoFar: 1 })).toBe(true);
+    expect(shouldRetryLens({ role: "reviewer", conclusion: "failure", attemptsSoFar: 2 })).toBe(false);
+    expect(MAX_LENS_ATTEMPTS).toBe(2);
+  });
+
+  it("never retries a successful lens", () => {
+    expect(shouldRetryLens({ role: "reviewer", conclusion: "success", attemptsSoFar: 1 })).toBe(false);
+  });
+
+  it("does not retry the validator review, whose failure is already tolerated", () => {
+    expect(shouldRetryLens({ role: "validator-review", conclusion: "failure", attemptsSoFar: 1 })).toBe(false);
+    // ...and it is still excluded from the required-failure set, unchanged.
+    expect(
+      failedRequiredReviewLensIds([
+        { job: { lens: { id: "risk", title: "R", focus: "f" }, role: "validator-review" }, conclusion: "failure" },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("still fails the review closed when both attempts fail", () => {
+    // The gate is unchanged: a twice-failed required lens is a real failure.
+    expect(shouldRetryLens({ role: "reviewer", conclusion: "failure", attemptsSoFar: MAX_LENS_ATTEMPTS })).toBe(false);
+    expect(
+      failedRequiredReviewLensIds([
+        { job: { lens: { id: "risk", title: "R", focus: "f" }, role: "reviewer" }, conclusion: "failure" },
+      ]),
+    ).toEqual(["risk"]);
+  });
+});
+
+describe("diff prompt budget reporting", () => {
+  const lens = { id: "risk", title: "Risk Review", focus: "Correctness and security." };
+
+  it("reports the budget the packer actually received, not a re-derived one", () => {
+    const reports: Array<{ modelLabel: string; diffPromptBudgetChars: number; reservedChars: number; excludePaths: string[] }> = [];
+    buildLensPrompt({
+      data: dataFixture,
+      userRequest: "",
+      lens,
+      modelLabel: "deepseek/deepseek-v4-pro",
+      repoConfig: { ignorePaths: [], excludePaths: [".planning/**"], instructions: [] },
+      onBudget: (report) => reports.push(report),
+    });
+
+    expect(reports).toHaveLength(1);
+    expect(reports[0].excludePaths).toEqual([".planning/**"]);
+    // Reservation is real and non-zero, so the budget must be BELOW the flat
+    // model budget — the exact desync that let the gate assume a larger window
+    // than the reviewer had.
+    expect(reports[0].reservedChars).toBeGreaterThan(0);
+    expect(reports[0].diffPromptBudgetChars).toBeLessThan(320_000);
+    expect(reports[0].diffPromptBudgetChars).toBe(
+      Math.max(8_000, 320_000 - reports[0].reservedChars),
+    );
+  });
+
+  it("reports a larger budget for a model with a larger input window", () => {
+    const seen: number[] = [];
+    for (const modelLabel of ["deepseek/deepseek-v4-pro", "moonshotai/kimi-k3"]) {
+      buildLensPrompt({
+        data: dataFixture,
+        userRequest: "",
+        lens,
+        modelLabel,
+        repoConfig: { ignorePaths: [], excludePaths: [], instructions: [] },
+        onBudget: (report) => seen.push(report.diffPromptBudgetChars),
+      });
+    }
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toBeGreaterThan(seen[0]);
+  });
+});

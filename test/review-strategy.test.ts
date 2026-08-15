@@ -473,6 +473,7 @@ describe("review strategy", () => {
       repoConfig: {
         severityThreshold: "important",
         ignorePaths: ["docs/**"],
+        excludePaths: [],
         instructions: ["Treat auth changes as security-sensitive."],
       },
     });
@@ -557,6 +558,7 @@ describe("review strategy", () => {
       repoConfig: {
         severityThreshold: "important",
         ignorePaths: ["docs/**"],
+        excludePaths: [],
         instructions: ["Treat auth changes as security-sensitive."],
       },
     });

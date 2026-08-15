@@ -208,6 +208,10 @@ ignore_paths:
   - docs/**
   - "*.md"
 
+exclude_paths:
+  - "**/fixtures/**"
+  - "**/*.lock"
+
 instructions:
   - Treat auth and permission changes as security-sensitive.
   - Require tests for parser and config changes.
@@ -227,19 +231,25 @@ Supported keys:
 | `max_cost_usd` | Soft cap; downgrade multi-lens reviews when known input-side estimates already exceed it |
 | `severity_threshold` | Prompt-level reviewer threshold: `critical`, `important`, or `minor` |
 | `knowledge_paths` | Repo-local docs or directories to include as bounded review context |
-| `ignore_paths` | Skip a finding only when all of its evidence lies inside these paths; still surface issues that leak impact outside them |
+| `ignore_paths` | Skip a finding only when all of its evidence lies inside these paths; still surface issues that leak impact outside them. Prompt guidance only — matching files are still packed into the prompt and still sent to the model |
+| `exclude_paths` | Drop matching files from the packed diff entirely — contents and overview entry alike. Unlike `ignore_paths`, these files are never transmitted, so the budget they would have consumed is reclaimed for reviewable code |
 | `instructions` | Extra repo-specific review policy inserted into every prompt |
 
 Workflow inputs override `.elek.yml` when explicitly set. To disable config
 loading, set `config_path: none`, `off`, or `false`. Severity thresholds and
-ignore paths are review instructions, not a server-side comment filter. If an
+ignore paths are review instructions, not a server-side comment filter.
+`exclude_paths` is the opposite: it is enforced in the prompt packer, not asked
+of the model, so it both reclaims prompt budget and keeps matching files out of
+the request body. Use `ignore_paths` to shape findings and `exclude_paths` to
+shape what is sent. If a diff cannot be parsed into per-file patches while
+`exclude_paths` is set, the diff is withheld rather than sent unfiltered. If an
 existing config file has malformed YAML, elek fails the run instead of silently
 dropping repo policy.
 
 Security note: on pull requests, elek loads policy and guidance fields
 (`review_strategy`, `review_models`, `review_lenses`, `advisor_model`,
 `validator_model`, `cost_rates`, `max_cost_usd`,
-`severity_threshold`, `knowledge_paths`, `ignore_paths`, and `instructions`)
+`severity_threshold`, `knowledge_paths`, `ignore_paths`, `exclude_paths`, and `instructions`)
 from the base branch when available. A pull request cannot weaken its own
 review policy. Each run logs the loaded config source plus effective
 strategy/model/severity choices.

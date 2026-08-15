@@ -462,7 +462,7 @@ instructions:
 Supported keys: `review_strategy`, `review_models`, `review_lenses`,
 `review_agent_count`, `advisor_model`, `advisor_thinking`, `validator_model`,
 `validator_thinking`, `cost_rates`, `max_cost_usd`, `severity_threshold`,
-`knowledge_paths`, `ignore_paths`, and `instructions`.
+`knowledge_paths`, `ignore_paths`, `exclude_paths`, and `instructions`.
 `cost_rates` uses the same `model=inputPerMillion:outputPerMillion` format as
 the workflow input.
 `severity_threshold` accepts `critical`, `important`, or `minor`. Severity
@@ -473,7 +473,7 @@ the run instead of silently dropping repo policy.
 On pull requests, policy and guidance fields (`review_strategy`,
 `review_models`, `review_lenses`, `advisor_model`, `validator_model`,
 `cost_rates`, `max_cost_usd`, changed-line warning thresholds,
-`severity_threshold`, `knowledge_paths`, `ignore_paths`, and `instructions`)
+`severity_threshold`, `knowledge_paths`, `ignore_paths`, `exclude_paths`, and `instructions`)
 are loaded from the base branch when available. The checked-out pull request
 cannot weaken its own review policy. `knowledge_paths` points elek at repo-local docs that should
 shape review judgment, such as agent instructions, contribution guidelines,

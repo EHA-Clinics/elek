@@ -390,10 +390,16 @@ export function selectReviewPlanWithinBudget(args: {
   return { plan, support, events };
 }
 
-function changedFilesBlock(data: GitHubData, modelLabel: string, reservedChars: number): string {
+function changedFilesBlock(
+  data: GitHubData,
+  modelLabel: string,
+  reservedChars: number,
+  excludePaths: readonly string[] | undefined,
+): string {
   return formatChangedFilesForPrompt(
     data.diff,
     diffPromptBudgetChars(modelLabel, reservedChars),
+    { excludePaths },
   );
 }
 
@@ -471,7 +477,7 @@ export function buildLensPrompt(params: {
     ``,
     `<changed_files>`,
     "```diff",
-    changedFilesBlock(data, modelLabel, reservedChars),
+    changedFilesBlock(data, modelLabel, reservedChars, repoConfig?.excludePaths),
     "```",
     `</changed_files>`,
     ``,
@@ -574,7 +580,7 @@ export function buildSynthesisPrompt(params: {
     ``,
     `<changed_files>`,
     "```diff",
-    changedFilesBlock(data, modelLabel, reservedChars),
+    changedFilesBlock(data, modelLabel, reservedChars, repoConfig?.excludePaths),
     "```",
     `</changed_files>`,
     ``,

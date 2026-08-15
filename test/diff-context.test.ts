@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import {
+  applyExcludePaths,
   diffPromptBudgetChars,
   formatChangedFilesForPrompt,
+  globToRegExp,
   modelInputBudgetChars,
   parseUnifiedDiffFiles,
 } from "../src/review/diff-context";
@@ -102,5 +104,138 @@ describe("diff prompt context", () => {
     expect(modelInputBudgetChars("together/moonshotai/Kimi-K3")).toBe(2_700_000);
     expect(diffPromptBudgetChars("together/zai-org/GLM-5.2", 40_000)).toBe(500_000);
     expect(diffPromptBudgetChars("unknown/model", 20_000)).toBe(300_000);
+  });
+});
+
+describe("exclude_paths filtering", () => {
+  const fileDiff = (path: string, body: string) =>
+    [
+      `diff --git a/${path} b/${path}`,
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      "@@ -1,1 +1,2 @@",
+      ` context`,
+      `+${body}`,
+    ].join("\n");
+
+  describe("globToRegExp", () => {
+    it("lets **/ match zero leading directory segments", () => {
+      const rx = globToRegExp("**/fixtures/**");
+      expect(rx.test("fixtures/patient.json")).toBe(true);
+      expect(rx.test("a/b/fixtures/patient.json")).toBe(true);
+      expect(rx.test("src/fixturesque/a.ts")).toBe(false);
+    });
+
+    it("does not let * cross a path separator", () => {
+      const rx = globToRegExp("src/*.ts");
+      expect(rx.test("src/a.ts")).toBe(true);
+      expect(rx.test("src/nested/a.ts")).toBe(false);
+    });
+
+    it("treats ? as a single non-separator character and . as a literal", () => {
+      expect(globToRegExp("a?.ts").test("ab.ts")).toBe(true);
+      expect(globToRegExp("a?.ts").test("a/.ts")).toBe(false);
+      expect(globToRegExp("a.ts").test("axts")).toBe(false);
+    });
+
+    it("compiles unsupported brace globs to a pattern that matches nothing", () => {
+      // Documented limitation — assert it rather than let it surprise someone.
+      expect(globToRegExp("**/*.{ts,tsx}").test("src/a.ts")).toBe(false);
+    });
+  });
+
+  describe("applyExcludePaths", () => {
+    it("partitions files by glob and keeps everything when no globs are given", () => {
+      const files = parseUnifiedDiffFiles(
+        [fileDiff("src/app.ts", "keep"), fileDiff(".planning/notes.md", "drop")].join("\n"),
+      );
+      expect(applyExcludePaths(files, []).kept).toHaveLength(2);
+      const { kept, excluded } = applyExcludePaths(files, [".planning/**"]);
+      expect(kept.map((f) => f.path)).toEqual(["src/app.ts"]);
+      expect(excluded.map((f) => f.path)).toEqual([".planning/notes.md"]);
+    });
+
+    it("keeps a rename that moves a file OUT of an excluded tree", () => {
+      const renamed = {
+        path: "src/app.ts",
+        oldPath: ".planning/app.ts",
+        status: "renamed" as const,
+        additions: 1,
+        deletions: 0,
+        patch: "diff --git a/.planning/app.ts b/src/app.ts",
+      };
+      expect(applyExcludePaths([renamed], [".planning/**"]).kept).toHaveLength(1);
+    });
+  });
+
+  it("removes excluded file contents AND overview entries from the prompt", () => {
+    const diff = [
+      fileDiff("src/app.ts", "REVIEWABLE_TOKEN"),
+      fileDiff(".planning/secret.md", "EXCLUDED_TOKEN"),
+    ].join("\n");
+    const packed = formatChangedFilesForPrompt(diff, 320_000, { excludePaths: [".planning/**"] });
+    expect(packed).toContain("REVIEWABLE_TOKEN");
+    expect(packed).not.toContain("EXCLUDED_TOKEN");
+    expect(packed).not.toContain(".planning/secret.md");
+    expect(packed).toContain("1 changed file(s) excluded");
+  });
+
+  it("does not leak excluded content through the FULL-diff path", () => {
+    // Regression guard: the full-diff branch used to embed the raw diff string,
+    // which would re-admit every excluded file after filtering the file list.
+    const diff = [
+      fileDiff("src/app.ts", "REVIEWABLE_TOKEN"),
+      fileDiff("secrets/creds.txt", "EXCLUDED_TOKEN"),
+    ].join("\n");
+    const packed = formatChangedFilesForPrompt(diff, 1_000_000, { excludePaths: ["secrets/**"] });
+    expect(packed).toContain("# Full diff");
+    expect(packed).not.toContain("EXCLUDED_TOKEN");
+  });
+
+  it("withholds an unparseable diff rather than transmitting it unfiltered", () => {
+    const unparseable = "this text contains no diff --gi headers at all";
+    expect(formatChangedFilesForPrompt(unparseable, 320_000, { excludePaths: ["x/**"] })).not.toContain(
+      "no diff --gi headers",
+    );
+    // Without exclude_paths there is nothing to honour, so the old behaviour stands.
+    expect(formatChangedFilesForPrompt(unparseable, 320_000)).toContain("no diff --gi headers");
+  });
+
+  it("reports zero reviewable files when everything is excluded", () => {
+    const diff = fileDiff(".planning/a.md", "EXCLUDED_TOKEN");
+    const packed = formatChangedFilesForPrompt(diff, 320_000, { excludePaths: [".planning/**"] });
+    expect(packed).not.toContain("EXCLUDED_TOKEN");
+    expect(packed).toContain("0 reviewable files");
+  });
+
+  it("reclaims prompt budget so real source is shown in full (the PR #362 shape)", () => {
+    // Large excluded artifacts + one small source file, under a budget far too
+    // small to hold both. This is the exact starvation that produced
+    // PARTIAL_SOURCE: the source file was shown at 5-15%.
+    const noise = Array.from({ length: 20 }, (_, i) =>
+      fileDiff(`.planning/capture-${i}.py`, "X".repeat(4_000)),
+    );
+    const source = fileDiff("src/app.ts", "REVIEWABLE_TOKEN_" + "Y".repeat(3_000));
+    const diff = [...noise, source].join("\n");
+    const budget = 20_000;
+
+    const before = formatChangedFilesForPrompt(diff, budget);
+    const after = formatChangedFilesForPrompt(diff, budget, { excludePaths: [".planning/**"] });
+
+    // Before: the source file is truncated by the per-file slice budget.
+    expect(before).toContain("file diff truncated");
+    // After: it fits whole, and none of the excluded content is present.
+    expect(after).toContain("REVIEWABLE_TOKEN_" + "Y".repeat(3_000));
+    expect(after).not.toContain(".planning/capture-0.py");
+  });
+
+  it("is byte-identical to the pre-patch behaviour when no exclude_paths are set", () => {
+    const diff = [fileDiff("src/a.ts", "one"), fileDiff("docs/b.md", "two")].join("\n");
+    expect(formatChangedFilesForPrompt(diff, 320_000, {})).toBe(
+      formatChangedFilesForPrompt(diff, 320_000),
+    );
+    expect(formatChangedFilesForPrompt(diff, 320_000, { excludePaths: [] })).toBe(
+      formatChangedFilesForPrompt(diff, 320_000),
+    );
   });
 });

@@ -21,6 +21,12 @@ export interface ElekConfig {
   /** Loaded repo knowledge files. Populated after config parsing. */
   knowledge?: RepoKnowledgeFile[];
   ignorePaths: string[];
+  /**
+   * Repo-relative globs DROPPED from the review prompt entirely. Unlike
+   * `ignorePaths` (which is prompt text asking the model to suppress findings,
+   * and still transmits the file), these files are never packed and never sent.
+   */
+  excludePaths: string[];
   instructions: string[];
 }
 
@@ -49,6 +55,7 @@ type ElekConfigKey =
   | "severityThreshold"
   | "knowledgePaths"
   | "ignorePaths"
+  | "excludePaths"
   | "instructions";
 
 export class ElekConfigParseError extends Error {
@@ -72,6 +79,7 @@ const KEY_MAP: Record<string, ElekConfigKey> = {
   severity_threshold: "severityThreshold",
   knowledge_paths: "knowledgePaths",
   ignore_paths: "ignorePaths",
+  exclude_paths: "excludePaths",
   instructions: "instructions",
 };
 
@@ -110,7 +118,7 @@ export function normalizeReviewStrategy(raw: string | undefined): string | undef
 }
 
 function emptyConfig(): ElekConfig {
-  return { ignorePaths: [], instructions: [] };
+  return { ignorePaths: [], excludePaths: [], instructions: [] };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -266,6 +274,7 @@ export function parseElekConfig(
     // silently ignored.
     switch (key) {
       case "ignorePaths":
+      case "excludePaths":
       case "instructions":
         config[key] = boundedPromptList(stringList(value, rawKey, warn), rawKey, warn);
         break;
@@ -687,6 +696,7 @@ export function mergeBasePolicyWithWorkspaceGuidance(
     knowledgePaths: basePolicy.knowledgePaths,
     knowledge: workspaceGuidance.knowledge,
     ignorePaths: basePolicy.ignorePaths,
+    excludePaths: basePolicy.excludePaths,
     instructions: basePolicy.instructions,
   };
 }
@@ -754,6 +764,7 @@ export function formatConfigAuditLog(
     `knowledge_paths=${knowledgePaths}`,
     `knowledge_files=${(config.knowledge ?? []).length}`,
     `ignore_paths=${config.ignorePaths.length > 0 ? config.ignorePaths.join(",") : "(none)"}`,
+    `exclude_paths=${config.excludePaths.length > 0 ? config.excludePaths.join(",") : "(none)"}`,
     `instructions=${config.instructions.length}`,
   ];
   if (effective) {
@@ -782,6 +793,11 @@ export function formatConfigPromptBlock(config: ElekConfig): string[] {
     lines.push("ignore_paths:");
     lines.push(...config.ignorePaths.map((path) => `- ${promptText(path)}`));
     lines.push("Skip findings whose evidence is entirely within ignored paths. Still surface findings in ignored paths if they cause a security or runtime issue elsewhere in the codebase.");
+  }
+  if (config.excludePaths.length > 0) {
+    lines.push("exclude_paths:");
+    lines.push(...config.excludePaths.map((path) => `- ${promptText(path)}`));
+    lines.push("Files matching exclude_paths were removed from the changed-files diff entirely and were never sent to you. Do not report findings about them, and do not treat their absence as evidence they were unchanged.");
   }
   if (config.instructions.length > 0) {
     lines.push("instructions:");

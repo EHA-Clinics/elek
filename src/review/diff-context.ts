@@ -7,10 +7,109 @@ export interface ChangedFilePatch {
   patch: string;
 }
 
+export interface PromptPackingOptions {
+  /**
+   * Repo-relative globs whose files are DROPPED from the packed prompt
+   * entirely — contents, overview entry and all. Distinct from `ignore_paths`,
+   * which only asks the model to suppress findings and still transmits the file.
+   */
+  excludePaths?: readonly string[];
+}
+
 const MIN_FILE_SLICE_CHARS = 700;
 const MAX_FILE_SLICE_CHARS = 64_000;
 const DEFAULT_MODEL_INPUT_BUDGET_CHARS = 320_000;
 const MIN_DIFF_PROMPT_CHARS = 8_000;
+
+const REGEX_SPECIAL_CHARS = /[.*+?^${}()|[\]\\]/g;
+
+/**
+ * Compile a minimatch-style path glob to an anchored RegExp.
+ *
+ * Semantics deliberately mirror gitignore-style globbers rather than fnmatch
+ * (whose `*` crosses `/` and would over-match):
+ *   - `**​/` matches zero or more leading directory segments, so `**​/fixtures/**`
+ *     also matches a repo-root `fixtures/a.py`
+ *   - `**`  matches anything, including `/`
+ *   - `*`   matches anything except `/` (a single path segment)
+ *   - `?`   matches a single non-`/` character
+ * Every other character is literal. Matching is case-sensitive, because git
+ * paths are.
+ *
+ * LIMITATION: brace expansion (`{ts,tsx}`) and character classes (`[abc]`) are
+ * NOT supported — those characters are escaped to literals, so such a glob
+ * compiles to a pattern that never matches. Add handling here before allowing
+ * one into `exclude_paths`, or the exclusion silently stops applying.
+ *
+ * Implemented in-file with ZERO dependencies on purpose: this module is
+ * vendored byte-for-byte into the AI-review coverage gate and executed there
+ * standalone via Node type-stripping, where npm resolution is unavailable. A
+ * `minimatch` import would work here and break there.
+ */
+export function globToRegExp(pattern: string): RegExp {
+  let out = "";
+  let i = 0;
+  while (i < pattern.length) {
+    if (pattern.startsWith("**/", i)) {
+      out += "(?:.*/)?";
+      i += 3;
+    } else if (pattern.startsWith("**", i)) {
+      out += ".*";
+      i += 2;
+    } else if (pattern[i] === "*") {
+      out += "[^/]*";
+      i += 1;
+    } else if (pattern[i] === "?") {
+      out += "[^/]";
+      i += 1;
+    } else {
+      out += pattern[i].replace(REGEX_SPECIAL_CHARS, "\\$&");
+      i += 1;
+    }
+  }
+  return new RegExp(`^${out}$`);
+}
+
+function compileExcludePatterns(patterns: readonly string[] | undefined): RegExp[] {
+  if (!patterns || patterns.length === 0) return [];
+  const compiled: RegExp[] = [];
+  for (const pattern of patterns) {
+    const trimmed = pattern.trim();
+    if (trimmed) compiled.push(globToRegExp(trimmed));
+  }
+  return compiled;
+}
+
+/** True when `path` matches any of the supplied globs. */
+export function isPathExcluded(path: string, patterns: readonly string[] | undefined): boolean {
+  return compileExcludePatterns(patterns).some((rx) => rx.test(path));
+}
+
+/**
+ * Partition parsed diff files into those that survive `exclude_paths` and those
+ * dropped by it. A renamed file is excluded only when BOTH its old and new
+ * paths match, so moving a file OUT of an excluded tree still gets reviewed.
+ */
+export function applyExcludePaths(
+  files: readonly ChangedFilePatch[],
+  patterns: readonly string[] | undefined,
+): { kept: ChangedFilePatch[]; excluded: ChangedFilePatch[] } {
+  const compiled = compileExcludePatterns(patterns);
+  if (compiled.length === 0) return { kept: [...files], excluded: [] };
+
+  const kept: ChangedFilePatch[] = [];
+  const excluded: ChangedFilePatch[] = [];
+  for (const file of files) {
+    const newMatches = compiled.some((rx) => rx.test(file.path));
+    const oldMatches = compiled.some((rx) => rx.test(file.oldPath));
+    if (newMatches && (file.status !== "renamed" || oldMatches)) {
+      excluded.push(file);
+    } else {
+      kept.push(file);
+    }
+  }
+  return { kept, excluded };
+}
 
 /**
  * Approximate full-input budgets after reserving model output and provider
@@ -62,14 +161,37 @@ export function parseUnifiedDiffFiles(diff: string): ChangedFilePatch[] {
 export function formatChangedFilesForPrompt(
   diff: string | undefined,
   maxChars = DEFAULT_MODEL_INPUT_BUDGET_CHARS,
+  options: PromptPackingOptions = {},
 ): string {
   if (!diff) return "(diff unavailable; inspect files from the workspace if needed)";
 
-  const files = parseUnifiedDiffFiles(diff);
-  if (files.length === 0) return fallbackTruncatedDiff(diff, maxChars);
+  const excludePatterns = options.excludePaths ?? [];
+  const parsed = parseUnifiedDiffFiles(diff);
+  if (parsed.length === 0) {
+    // FAIL CLOSED. With no parseable `diff --git` headers we cannot attribute
+    // content to paths, so we cannot honour exclude_paths. Emitting the raw
+    // diff here would transmit excluded files and quietly falsify the guarantee
+    // the key exists to provide, so we withhold it instead.
+    if (excludePatterns.length > 0) {
+      return "(diff could not be parsed into per-file patches; withheld because exclude_paths is configured and exclusion could not be verified — inspect files from the workspace with read/grep/find/ls)";
+    }
+    return fallbackTruncatedDiff(diff, maxChars);
+  }
 
-  const overview = formatFileOverview(files);
-  const fullDiffWithOverview = `${overview}\n\n# Full diff\n${diff}`;
+  const { kept: files, excluded } = applyExcludePaths(parsed, excludePatterns);
+  const excludedNote =
+    excluded.length > 0
+      ? `# ... ${excluded.length} changed file(s) excluded from this prompt by exclude_paths and NOT shown; do not report findings about them.`
+      : "";
+  if (files.length === 0) {
+    return `# Changed file overview (0 reviewable files)\n${excludedNote || "# ... every changed file was excluded by exclude_paths."}`;
+  }
+
+  // Rebuild the diff from the SURVIVING patches. Reusing the raw `diff` string
+  // here would re-admit every excluded file through the full-diff path below.
+  const keptDiff = files.map((file) => file.patch).join("\n");
+  const overview = [formatFileOverview(files), excludedNote].filter(Boolean).join("\n");
+  const fullDiffWithOverview = `${overview}\n\n# Full diff\n${keptDiff}`;
   if (fullDiffWithOverview.length <= maxChars) {
     return fullDiffWithOverview;
   }
@@ -109,7 +231,7 @@ export function formatChangedFilesForPrompt(
     blocks.push(`# ... ${omitted} changed file(s) omitted from diff slices; see the full file overview above and inspect files with read/grep/find/ls as needed.`);
   }
   blocks.push("");
-  blocks.push(`# ... diff truncated by file for prompt budget; original diff was ${diff.length.toLocaleString("en-US")} characters.`);
+  blocks.push(`# ... diff truncated by file for prompt budget; reviewable diff was ${keptDiff.length.toLocaleString("en-US")} characters.`);
 
   return blocks.join("\n").slice(0, maxChars);
 }

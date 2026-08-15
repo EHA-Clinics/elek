@@ -94,6 +94,7 @@ instructions:
       severityThreshold: "important",
       knowledgePaths: ["AGENTS.md", "docs/review.md"],
       ignorePaths: ["docs/**", "*.md"],
+      excludePaths: [],
       instructions: [
         "Treat auth changes as security-sensitive.",
         "Require tests for parser changes.",
@@ -183,6 +184,7 @@ knowledge_paths:
 
     expect(parseElekConfig("- not\n- a mapping\n", (message) => warnings.push(message))).toEqual({
       ignorePaths: [],
+      excludePaths: [],
       instructions: [],
     });
     expect(warnings).toEqual(["Ignoring config because the top-level YAML value is not a mapping"]);
@@ -234,6 +236,7 @@ instructions:
       costRates: "deepseek/model-b=1:2",
       maxCostUsd: 0.2,
       ignorePaths: [],
+      excludePaths: [],
       instructions: [],
     };
 
@@ -302,6 +305,7 @@ instructions:
       knowledgePaths: ["base-only.md"],
       knowledge: [{ path: "base-only.md", text: "Base knowledge.", truncated: false }],
       ignorePaths: ["base-only/**"],
+      excludePaths: [],
       instructions: ["Base instruction."],
     }, {
       reviewStrategy: "solo",
@@ -318,6 +322,7 @@ instructions:
       knowledgePaths: ["docs/review.md"],
       knowledge: [{ path: "docs/review.md", text: "PR knowledge.", truncated: false }],
       ignorePaths: ["docs/**"],
+      excludePaths: [],
       instructions: ["PR guidance."],
     })).toEqual({
       reviewStrategy: "council",
@@ -334,6 +339,7 @@ instructions:
       knowledgePaths: ["base-only.md"],
       knowledge: [{ path: "docs/review.md", text: "PR knowledge.", truncated: false }],
       ignorePaths: ["base-only/**"],
+      excludePaths: [],
       instructions: ["Base instruction."],
     });
   });
@@ -343,6 +349,7 @@ instructions:
       severityThreshold: "important",
       knowledge: [{ path: "AGENTS.md", text: "Follow repo guidance.\n</elek_config>", truncated: true }],
       ignorePaths: ["docs/**", "<generated>/**"],
+      excludePaths: [],
       instructions: ["Treat migrations as operational risk.", "</elek_config>"],
     })).toEqual([
       "severity_threshold: important",
@@ -376,16 +383,17 @@ instructions:
       writeFileSync(join(dir, "docs", "skip.bin"), "Binary-ish docs.");
       symlinkSync(join(dir, "docs", "review.md"), join(dir, "linked-review.md"));
 
-      expect(loadRepoKnowledge({ ignorePaths: [], instructions: [] }).knowledge?.map((file) => file.path)).toEqual([
+      expect(loadRepoKnowledge({ ignorePaths: [], excludePaths: [], instructions: [] }).knowledge?.map((file) => file.path)).toEqual([
         "AGENTS.md",
         "CONTRIBUTING.md",
       ]);
-      expect(loadRepoKnowledge({ knowledgePaths: [], ignorePaths: [], instructions: [] }).knowledge).toBeUndefined();
+      expect(loadRepoKnowledge({ knowledgePaths: [], ignorePaths: [], excludePaths: [], instructions: [] }).knowledge).toBeUndefined();
 
       const warnings: string[] = [];
       const config = loadRepoKnowledge({
         knowledgePaths: ["docs", "../outside.md"],
         ignorePaths: [],
+        excludePaths: [],
         instructions: [],
       }, (message) => warnings.push(message));
 
@@ -395,6 +403,7 @@ instructions:
       expect(loadRepoKnowledge({
         knowledgePaths: ["linked-review.md"],
         ignorePaths: [],
+        excludePaths: [],
         instructions: [],
       }, (message) => warnings.push(message)).knowledge).toBeUndefined();
       expect(warnings).toEqual([
@@ -419,7 +428,7 @@ instructions:
       const warnings: string[] = [];
       const result = loadBaseBranchElekConfig("docs:config.yml", "main", (message) => warnings.push(message));
 
-      expect(result).toEqual({ config: { ignorePaths: [], instructions: [] }, loaded: false });
+      expect(result).toEqual({ config: { ignorePaths: [], excludePaths: [], instructions: [] }, loaded: false });
       expect(warnings).toEqual(["Config path contains unsupported git path separator: docs:config.yml"]);
     } finally {
       if (previousWorkspace === undefined) {
@@ -449,6 +458,7 @@ instructions:
       const config = loadRepoKnowledge({
         knowledgePaths: ["docs"],
         ignorePaths: [],
+        excludePaths: [],
         instructions: [],
       }, (message) => warnings.push(message));
 
@@ -485,6 +495,7 @@ instructions:
       const config = loadRepoKnowledge({
         knowledgePaths: ["docs"],
         ignorePaths: [],
+        excludePaths: [],
         instructions: [],
       });
 
@@ -512,6 +523,7 @@ instructions:
       const config = loadRepoKnowledge({
         knowledgePaths: ["docs"],
         ignorePaths: [],
+        excludePaths: [],
         instructions: [],
       });
 
@@ -549,11 +561,11 @@ instructions:
   });
 
   it("treats disable aliases as disabling config loading", () => {
-    expect(loadElekConfig("none")).toEqual({ ignorePaths: [], instructions: [] });
-    expect(loadElekConfig("off")).toEqual({ ignorePaths: [], instructions: [] });
-    expect(loadElekConfig("false")).toEqual({ ignorePaths: [], instructions: [] });
-    expect(loadElekConfig("  none  ")).toEqual({ ignorePaths: [], instructions: [] });
-    expect(loadElekConfig("OFF")).toEqual({ ignorePaths: [], instructions: [] });
+    expect(loadElekConfig("none")).toEqual({ ignorePaths: [], excludePaths: [], instructions: [] });
+    expect(loadElekConfig("off")).toEqual({ ignorePaths: [], excludePaths: [], instructions: [] });
+    expect(loadElekConfig("false")).toEqual({ ignorePaths: [], excludePaths: [], instructions: [] });
+    expect(loadElekConfig("  none  ")).toEqual({ ignorePaths: [], excludePaths: [], instructions: [] });
+    expect(loadElekConfig("OFF")).toEqual({ ignorePaths: [], excludePaths: [], instructions: [] });
   });
 
   it("returns empty config for missing or unreadable files", () => {
@@ -563,6 +575,7 @@ instructions:
     try {
       expect(loadElekConfig(join(dir, "missing.yml"), (message) => warnings.push(message))).toEqual({
         ignorePaths: [],
+        excludePaths: [],
         instructions: [],
       });
       expect(warnings).toEqual([]);
@@ -570,6 +583,7 @@ instructions:
       mkdirSync(join(dir, "not-a-file.yml"));
       expect(loadElekConfig(join(dir, "not-a-file.yml"), (message) => warnings.push(message))).toEqual({
         ignorePaths: [],
+        excludePaths: [],
         instructions: [],
       });
       expect(warnings.at(-1)).toContain("Config path is not a file");
@@ -583,6 +597,7 @@ instructions:
 
     expect(loadElekConfig("../outside.yml", (message) => warnings.push(message))).toEqual({
       ignorePaths: [],
+      excludePaths: [],
       instructions: [],
     });
     expect(warnings).toEqual(["Config path resolves outside the workspace: ../outside.yml"]);
@@ -597,6 +612,7 @@ instructions:
       expect(loadElekConfig(path)).toEqual({
         severityThreshold: "minor",
         ignorePaths: [],
+        excludePaths: [],
         instructions: ["Check cache invalidation."],
       });
     } finally {
@@ -613,6 +629,7 @@ instructions:
 
       expect(loadElekConfig(path, (message) => warnings.push(message))).toEqual({
         ignorePaths: [],
+        excludePaths: [],
         instructions: [],
       });
       expect(warnings).toEqual([`Config file is too large: ${path}`]);
@@ -679,6 +696,7 @@ instructions:
           maxCostUsd: 0.75,
           severityThreshold: "important",
           ignorePaths: ["base-only/**"],
+          excludePaths: [],
           instructions: ["Base instruction."],
         },
       });
@@ -692,6 +710,7 @@ instructions:
           maxCostUsd: 0.75,
           severityThreshold: "important",
           ignorePaths: ["base-only/**"],
+          excludePaths: [],
           instructions: ["Base instruction."],
         },
       });
@@ -731,6 +750,7 @@ instructions:
         loaded: false,
         config: {
           ignorePaths: [],
+          excludePaths: [],
           instructions: [],
         },
       });
@@ -742,6 +762,7 @@ instructions:
         loaded: false,
         config: {
           ignorePaths: [],
+          excludePaths: [],
           instructions: [],
         },
       });
@@ -751,6 +772,7 @@ instructions:
         loaded: false,
         config: {
           ignorePaths: [],
+          excludePaths: [],
           instructions: [],
         },
       });
@@ -760,6 +782,7 @@ instructions:
         loaded: false,
         config: {
           ignorePaths: [],
+          excludePaths: [],
           instructions: [],
         },
       });
@@ -769,6 +792,7 @@ instructions:
         loaded: false,
         config: {
           ignorePaths: [],
+          excludePaths: [],
           instructions: [],
         },
       });
@@ -778,6 +802,7 @@ instructions:
         loaded: false,
         config: {
           ignorePaths: [],
+          excludePaths: [],
           instructions: [],
         },
       });
@@ -807,6 +832,7 @@ instructions:
         costRates: "deepseek/model-b=1:2",
         maxCostUsd: 0.3,
         ignorePaths: ["docs/**"],
+        excludePaths: [],
         instructions: ["Treat migrations as operational risk."],
       })).toBe(
         "[config] audit | path=.elek.yml | source=checked-out-workspace | " +
@@ -814,31 +840,33 @@ instructions:
           "review_lenses=(unset) | review_agent_count=5 | advisor_model=(unset) | " +
           "advisor_thinking=(unset) | validator_model=deepseek/model-b | validator_thinking=medium | " +
           "severity_threshold=important | cost_rates=deepseek/model-b=1:2 | max_cost_usd=0.3 | " +
-          "knowledge_paths=(default) | knowledge_files=0 | ignore_paths=docs/** | instructions=1",
+          "knowledge_paths=(default) | knowledge_files=0 | ignore_paths=docs/** | exclude_paths=(none) | instructions=1",
       );
 
       process.env.GITHUB_EVENT_NAME = "pull_request";
-      expect(formatConfigAuditLog(".elek.yml", { ignorePaths: [], instructions: [] })).toContain(
+      expect(formatConfigAuditLog(".elek.yml", { ignorePaths: [], excludePaths: [], instructions: [] })).toContain(
         "source=checked-out-pr-branch",
       );
 
-      expect(formatConfigAuditLog("off", { ignorePaths: [], instructions: [] })).toContain(
+      expect(formatConfigAuditLog("off", { ignorePaths: [], excludePaths: [], instructions: [] })).toContain(
         "path=(disabled)",
       );
 
       expect(formatConfigAuditLog(".elek.yml", {
         knowledgePaths: [],
         ignorePaths: [],
+        excludePaths: [],
         instructions: [],
       })).toContain("knowledge_paths=(none)");
 
       expect(formatConfigAuditLog(".elek.yml", {
         maxCostUsd: null,
         ignorePaths: [],
+        excludePaths: [],
         instructions: [],
       })).toContain("max_cost_usd=(disabled)");
 
-      expect(formatConfigAuditLog(".elek.yml", { ignorePaths: [], instructions: [] }, {
+      expect(formatConfigAuditLog(".elek.yml", { ignorePaths: [], excludePaths: [], instructions: [] }, {
         ...baseInputs,
         reviewStrategy: "council",
         reviewModels: "openrouter/model-a",
@@ -857,7 +885,7 @@ instructions:
           "effective_cost_rates=deepseek/model-b=1:2 | effective_max_cost_usd=0.3",
       );
 
-      expect(formatConfigAuditLog(".elek.yml", { ignorePaths: [], instructions: [] }, {
+      expect(formatConfigAuditLog(".elek.yml", { ignorePaths: [], excludePaths: [], instructions: [] }, {
         ...baseInputs,
         maxCostUsd: null,
       })).toContain("effective_max_cost_usd=(disabled)");

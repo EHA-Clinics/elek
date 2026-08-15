@@ -238,4 +238,33 @@ describe("exclude_paths filtering", () => {
       formatChangedFilesForPrompt(diff, 320_000),
     );
   });
+
+  it("still ENDS WITH the verbatim diff in the full regime when nothing is excluded", () => {
+    // Load-bearing structural property, asserted directly rather than by comparing
+    // this implementation against itself.
+    //
+    // Consumers identify the full-diff regime by testing whether the emitted prompt
+    // ends with the diff they passed in — it is the one regime that inlines the input
+    // verbatim. An earlier revision of this patch rebuilt the full-diff branch from the
+    // surviving patches unconditionally; the reconstruction drops any preamble and
+    // normalizes inter-file newlines, so the prompt stopped ending with the input and
+    // the full regime became undetectable for EVERY repository, including those that
+    // never set exclude_paths. A self-comparison cannot catch that, because both sides
+    // of the comparison move together.
+    // Trailing newline included deliberately: real `git diff` output ends with one,
+    // and it is precisely what a naive reconstruction drops. Without it the synthetic
+    // input round-trips through the rebuild unchanged and the assertion is vacuous.
+    const diff = `${[fileDiff("src/a.ts", "one"), fileDiff("docs/b.md", "two")].join("\n")}\n`;
+    expect(formatChangedFilesForPrompt(diff, 1_000_000).endsWith(diff)).toBe(true);
+    expect(formatChangedFilesForPrompt(diff, 1_000_000, { excludePaths: [] }).endsWith(diff)).toBe(true);
+    expect(formatChangedFilesForPrompt(diff, 1_000_000, { excludePaths: ["nothing/**"] }).endsWith(diff)).toBe(true);
+  });
+
+  it("does NOT end with the verbatim diff once a file is actually excluded", () => {
+    // The complement: when an exclusion really applies, the prompt must not carry the
+    // input verbatim — that is the whole point — so a consumer reading the regime
+    // structurally correctly stops calling it FULL.
+    const diff = [fileDiff("src/a.ts", "one"), fileDiff(".planning/b.md", "two")].join("\n");
+    expect(formatChangedFilesForPrompt(diff, 1_000_000, { excludePaths: [".planning/**"] }).endsWith(diff)).toBe(false);
+  });
 });

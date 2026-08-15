@@ -206,3 +206,59 @@ describe("isActorAuthorized", () => {
     expect(lookupCalls).toBe(0);
   });
 });
+
+describe("allowed_bots does not govern humans", () => {
+  // Regression: setting allowed_bots used to skip the default-trust branch and
+  // fall through to `return false`, silently denying every human PR a review
+  // while the required check stayed green.
+  const withBots = { ...baseInputs, allowedBots: "renovate[bot]" };
+
+  it("still reviews a trusted human when a bot is allowlisted", () => {
+    expect(isActorAllowed({ ...baseCtx, actor: "alice", actorAssociation: "MEMBER" }, withBots)).toBe(true);
+    expect(isActorAllowed({ ...baseCtx, actor: "carol", actorAssociation: "OWNER" }, withBots)).toBe(true);
+    expect(isActorAllowed({ ...baseCtx, actor: "dave", actorAssociation: "COLLABORATOR" }, withBots)).toBe(true);
+  });
+
+  it("still denies an untrusted human when a bot is allowlisted", () => {
+    expect(isActorAllowed({ ...baseCtx, actor: "stranger", actorAssociation: "NONE" }, withBots)).toBe(false);
+  });
+
+  it("keeps the permission fallback available for humans when a bot is allowlisted", async () => {
+    let lookupCalls = 0;
+    const lookup = async () => {
+      lookupCalls += 1;
+      return "write";
+    };
+    expect(
+      await isActorAuthorized({ ...baseCtx, actor: "stale", actorAssociation: "NONE" }, withBots, lookup),
+    ).toBe(true);
+    expect(lookupCalls).toBe(1);
+  });
+
+  it("authorizes only the allowlisted bot, regardless of association", () => {
+    expect(isActorAllowed({ ...baseCtx, actor: "renovate[bot]", actorAssociation: "NONE" }, withBots)).toBe(true);
+    expect(isActorAllowed({ ...baseCtx, actor: "dependabot[bot]", actorAssociation: "MEMBER" }, withBots)).toBe(false);
+  });
+
+  it("never routes a bot through the human permission fallback", async () => {
+    let lookupCalls = 0;
+    const lookup = async () => {
+      lookupCalls += 1;
+      return "admin";
+    };
+    expect(
+      await isActorAuthorized({ ...baseCtx, actor: "dependabot[bot]", actorAssociation: "NONE" }, withBots, lookup),
+    ).toBe(false);
+    expect(lookupCalls).toBe(0);
+  });
+
+  it("keeps actor_filter authoritative for humans when both inputs are set", () => {
+    // The two inputs are independent: the bot list must not widen the human
+    // allowlist, and the human allowlist must not widen the bot list.
+    const both = { ...baseInputs, actorFilter: "alice,bob", allowedBots: "renovate[bot]" };
+    expect(isActorAllowed({ ...baseCtx, actor: "alice", actorAssociation: "NONE" }, both)).toBe(true);
+    expect(isActorAllowed({ ...baseCtx, actor: "carol", actorAssociation: "MEMBER" }, both)).toBe(false);
+    expect(isActorAllowed({ ...baseCtx, actor: "renovate[bot]", actorAssociation: "NONE" }, both)).toBe(true);
+    expect(isActorAllowed({ ...baseCtx, actor: "alice[bot]", actorAssociation: "MEMBER" }, both)).toBe(false);
+  });
+});

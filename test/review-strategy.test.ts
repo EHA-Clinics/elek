@@ -27,6 +27,7 @@ const baseInputs: ActionInputs = {
   systemPrompt: "",
   maxTurns: 20,
   runTimeoutSeconds: 600,
+  stallTimeoutSeconds: 0,
   tools: "",
   configPath: ".elek.yml",
   branchPrefix: "elek/",

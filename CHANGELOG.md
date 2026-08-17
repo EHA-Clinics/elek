@@ -18,6 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Report provider retry counts in per-run review metrics and action logs.
+- `stall_timeout_seconds`: a stream-idle watchdog, independent of the wall-clock
+  `run_timeout_seconds`. A run that emits no valid pi stream event for the
+  threshold is terminated and reported with failure class `stall`, which a
+  wall-clock timer alone cannot distinguish from genuinely slow work. Defaults to
+  `0` (disabled); disabled in `ELEK_PI_TEXT_MODE`, where `pi -p` legitimately
+  emits nothing until it finishes.
+- A total failure taxonomy on `PiRunResult` — `stall`, `timeout`, `max_turns`,
+  `invalid_output`, `provider_transient`, `provider_permanent`, `process_error`,
+  `unknown` — plus `terminationReason` for the subset elek causes itself.
+  Provider classes are derived from structured status codes only, never from
+  message text.
+- Per-run stream telemetry (`timeToFirstEventSeconds`, `maxIdleSecondsObserved`,
+  `streamEventCount`, `malformedLineCount`, `lastEventType`) so a stall threshold
+  can be calibrated from successful runs instead of guessed.
 
 ### Fixed
 

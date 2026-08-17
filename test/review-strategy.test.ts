@@ -11,7 +11,11 @@ import {
   resolveReviewPlanSupport,
   resolveReviewStrategy,
   selectReviewPlanWithinBudget,
-  shouldRetryLens,
+  resolveLensRetry,
+  selectFailoverModel,
+  distinctModels,
+  normalizeModelIdentity,
+  FAILURE_RETRY_POLICY,
   MAX_LENS_ATTEMPTS,
 } from "../src/review/strategy";
 import type { GitHubData } from "../src/github/data";
@@ -645,20 +649,113 @@ function reviewCost(costUsd: number, source: ReviewCost["source"] = "builtin"): 
   };
 }
 
-describe("shouldRetryLens", () => {
-  it("retries a failed required lens exactly once", () => {
-    expect(shouldRetryLens({ role: "reviewer", conclusion: "failure", attemptsSoFar: 1 })).toBe(true);
-    expect(shouldRetryLens({ role: "reviewer", conclusion: "failure", attemptsSoFar: 2 })).toBe(false);
+/* ────────────────────────────────────────────────────────────────────────────
+ * Typed, bounded retry and distinct-model failover (EHAC-2231, D2).
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+const PRO = { provider: "deepseek", model: "deepseek/deepseek-v4-pro", label: "deepseek/deepseek-v4-pro" };
+const MIMO = { provider: "xiaomi", model: "xiaomi/mimo-v2.5-pro", label: "xiaomi/mimo-v2.5-pro" };
+const FLASH = { provider: "deepseek", model: "deepseek/deepseek-v4-flash", label: "deepseek/deepseek-v4-flash" };
+const ROSTER = [PRO, MIMO, FLASH];
+
+describe("normalizeModelIdentity", () => {
+  it("collapses routing prefixes so one model is one identity", () => {
+    // elek's own modelLabelFor produces the second spelling from the first, so
+    // treating them as distinct would let a failover pick the model that just failed.
+    expect(normalizeModelIdentity({ provider: "openrouter", model: "openrouter/deepseek/deepseek-v4-pro" }))
+      .toBe(normalizeModelIdentity(PRO));
+    expect(normalizeModelIdentity({ provider: "deepseek", model: "DeepSeek/DeepSeek-V4-Pro" }))
+      .toBe(normalizeModelIdentity(PRO));
+    expect(normalizeModelIdentity({ provider: "deepseek", model: "deepseek//deepseek-v4-pro/" }))
+      .toBe(normalizeModelIdentity(PRO));
+  });
+
+  it("keeps genuinely different models apart", () => {
+    expect(normalizeModelIdentity(PRO)).not.toBe(normalizeModelIdentity(FLASH));
+    expect(normalizeModelIdentity(PRO)).not.toBe(normalizeModelIdentity(MIMO));
+  });
+
+  it("identifies a provider-default model by its provider", () => {
+    expect(normalizeModelIdentity({ provider: "anthropic", model: "" })).toBe("provider:anthropic");
+  });
+});
+
+describe("distinctModels", () => {
+  it("drops duplicate spellings while preserving roster order", () => {
+    const roster = [PRO, { provider: "openrouter", model: "openrouter/deepseek/deepseek-v4-pro", label: "openrouter/deepseek/deepseek-v4-pro" }, MIMO];
+    expect(distinctModels(roster).map((m) => m.label)).toEqual([PRO.label, MIMO.label]);
+  });
+});
+
+describe("selectFailoverModel", () => {
+  it("chooses the next distinct model deterministically and wraps once", () => {
+    expect(selectFailoverModel({ roster: ROSTER, assigned: PRO })!.label).toBe(MIMO.label);
+    expect(selectFailoverModel({ roster: ROSTER, assigned: MIMO })!.label).toBe(FLASH.label);
+    // Last entry wraps to the first — once.
+    expect(selectFailoverModel({ roster: ROSTER, assigned: FLASH })!.label).toBe(PRO.label);
+  });
+
+  it("never returns the same normalized model under a different spelling", () => {
+    const aliased = { provider: "openrouter", model: "openrouter/deepseek/deepseek-v4-pro", label: "openrouter/deepseek/deepseek-v4-pro" };
+    expect(selectFailoverModel({ roster: [PRO, aliased], assigned: PRO })).toBeUndefined();
+  });
+
+  it("offers no failover for a single-model roster", () => {
+    expect(selectFailoverModel({ roster: [PRO], assigned: PRO })).toBeUndefined();
+    expect(selectFailoverModel({ roster: [], assigned: PRO })).toBeUndefined();
+  });
+});
+
+describe("resolveLensRetry", () => {
+  const base = { role: "reviewer" as const, conclusion: "failure" as const, attemptsSoFar: 1, assignedModel: PRO, roster: ROSTER };
+
+  it("moves stall, timeout, max_turns and invalid_output to the next distinct model", () => {
+    for (const failureClass of ["stall", "timeout", "max_turns", "invalid_output"] as const) {
+      const decision = resolveLensRetry({ ...base, failureClass });
+      expect(decision.retry).toBe(true);
+      expect(decision.failover).toBe(true);
+      expect(decision.model!.label).toBe(MIMO.label);
+    }
+  });
+
+  it("retries a transient provider fault on the SAME model", () => {
+    const decision = resolveLensRetry({ ...base, failureClass: "provider_transient" });
+    expect(decision.retry).toBe(true);
+    expect(decision.failover).toBe(false);
+    expect(decision.model!.label).toBe(PRO.label);
+  });
+
+  it("never retries permanent, process or unclassified failures", () => {
+    for (const failureClass of ["provider_permanent", "process_error", "unknown"] as const) {
+      expect(resolveLensRetry({ ...base, failureClass }).retry).toBe(false);
+    }
+    // An ABSENT class is treated as `unknown`, not as "probably retryable".
+    expect(resolveLensRetry({ ...base, failureClass: undefined }).retry).toBe(false);
+  });
+
+  it("fails closed instead of retrying when the roster offers no distinct fallback", () => {
+    const decision = resolveLensRetry({ ...base, failureClass: "stall", roster: [PRO] });
+    expect(decision.retry).toBe(false);
+    expect(decision.reason).toContain("roster offers none");
+  });
+
+  it("still permits a same-model transient retry on a single-model roster", () => {
+    const decision = resolveLensRetry({ ...base, failureClass: "provider_transient", roster: [PRO] });
+    expect(decision.retry).toBe(true);
+    expect(decision.model!.label).toBe(PRO.label);
+  });
+
+  it("permits exactly ONE outer retry, never a hidden third attempt", () => {
     expect(MAX_LENS_ATTEMPTS).toBe(2);
+    expect(resolveLensRetry({ ...base, failureClass: "stall", attemptsSoFar: 1 }).retry).toBe(true);
+    expect(resolveLensRetry({ ...base, failureClass: "stall", attemptsSoFar: 2 }).retry).toBe(false);
+    expect(resolveLensRetry({ ...base, failureClass: "provider_transient", attemptsSoFar: 2 }).retry).toBe(false);
   });
 
-  it("never retries a successful lens", () => {
-    expect(shouldRetryLens({ role: "reviewer", conclusion: "success", attemptsSoFar: 1 })).toBe(false);
-  });
-
-  it("does not retry the validator review, whose failure is already tolerated", () => {
-    expect(shouldRetryLens({ role: "validator-review", conclusion: "failure", attemptsSoFar: 1 })).toBe(false);
-    // ...and it is still excluded from the required-failure set, unchanged.
+  it("never retries a successful attempt or the validator-review lane", () => {
+    expect(resolveLensRetry({ ...base, conclusion: "success", failureClass: undefined }).retry).toBe(false);
+    expect(resolveLensRetry({ ...base, role: "validator-review", failureClass: "stall" }).retry).toBe(false);
+    // ...and validator-review is still excluded from the required-failure set.
     expect(
       failedRequiredReviewLensIds([
         { job: { lens: { id: "risk", title: "R", focus: "f" }, role: "validator-review" }, conclusion: "failure" },
@@ -666,9 +763,14 @@ describe("shouldRetryLens", () => {
     ).toEqual([]);
   });
 
+  it("keeps the retry matrix TOTAL over the failure taxonomy", () => {
+    // A new failure class that nobody adds a policy row for would otherwise fall
+    // through to whatever `undefined` happens to mean at the call site.
+    const classes = ["stall", "timeout", "max_turns", "invalid_output", "provider_transient", "provider_permanent", "process_error", "unknown"];
+    expect(Object.keys(FAILURE_RETRY_POLICY).sort()).toEqual(classes.sort());
+  });
+
   it("still fails the review closed when both attempts fail", () => {
-    // The gate is unchanged: a twice-failed required lens is a real failure.
-    expect(shouldRetryLens({ role: "reviewer", conclusion: "failure", attemptsSoFar: MAX_LENS_ATTEMPTS })).toBe(false);
     expect(
       failedRequiredReviewLensIds([
         { job: { lens: { id: "risk", title: "R", focus: "f" }, role: "reviewer" }, conclusion: "failure" },

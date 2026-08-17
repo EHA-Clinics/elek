@@ -1,4 +1,4 @@
-import type { ActionInputs } from "../types.js";
+import type { ActionInputs, PiFailureClass } from "../types.js";
 import type { GitHubData } from "../github/data.js";
 import { mcpToolGuidance } from "../github/mcp-guidance.js";
 import { findingValidationBullets, reviewContractBullets, reviewFindingTemplate } from "./contract.js";
@@ -50,25 +50,177 @@ export function failedRequiredReviewLensIds(
     .map(({ job }) => job.lens.id);
 }
 
-/** A required lens gets one retry before the review fails closed. */
+/**
+ * A required lens gets ONE retry before the review fails closed.
+ *
+ * This is the only elek-managed outer retry layer that exists — verified by
+ * `resolveLensRetry` being the single caller-facing decision and by
+ * `runPi` having no retry of its own. pi's internal provider retries
+ * (`auto_retry_start`) are counted as telemetry and never create another outer
+ * attempt. The job-cap arithmetic downstream depends on that: one initial
+ * attempt plus at most one retry, never a hidden third.
+ */
 export const MAX_LENS_ATTEMPTS = 2;
 
 /**
- * Whether a failed lens run should be retried.
+ * What a retry should do about the MODEL, per terminal failure class.
  *
- * Only REQUIRED lenses retry (a validator-review failure is already tolerated
- * by failedRequiredReviewLensIds), and only once. This narrows the window in
- * which a single transient provider fault reds an otherwise healthy PR; it does
- * not soften the gate, because a lens that fails twice still fails the review.
+ * The split is the point. A repeated model-specific stall is deterministic per
+ * (model, prompt) pair — eha_care PR #3291 re-hung on a byte-identical prompt —
+ * so retrying the SAME model spends a second full wall-clock budget to reproduce
+ * the same hang. A transient provider fault is the opposite: the model is fine
+ * and the next request very likely succeeds, while moving to another model would
+ * change the review for no reason.
+ *
+ * `provider_permanent`, `process_error` and `unknown` never retry. `unknown` is
+ * the fail-closed default for anything elek could not classify from structured
+ * state, and it must stay that way: retrying on a class we could not establish
+ * is guessing with the job's wall clock.
  */
-export function shouldRetryLens(params: {
+export type LensRetryTarget = "same-model" | "next-distinct-model";
+
+export const FAILURE_RETRY_POLICY: Readonly<
+  Record<PiFailureClass, { retry: boolean; target: LensRetryTarget }>
+> = Object.freeze({
+  stall: { retry: true, target: "next-distinct-model" },
+  timeout: { retry: true, target: "next-distinct-model" },
+  max_turns: { retry: true, target: "next-distinct-model" },
+  invalid_output: { retry: true, target: "next-distinct-model" },
+  provider_transient: { retry: true, target: "same-model" },
+  provider_permanent: { retry: false, target: "same-model" },
+  process_error: { retry: false, target: "same-model" },
+  unknown: { retry: false, target: "same-model" },
+});
+
+/**
+ * Collapse a model spec to a routing-independent identity.
+ *
+ * `deepseek/deepseek-v4-pro` and `openrouter/deepseek/deepseek-v4-pro` are the
+ * same model reached two ways — elek's own `modelLabelFor` produces the second
+ * from the first — so a failover that "moved" between them would spend a second
+ * budget on the model that just failed. Taking the last two path segments is what
+ * makes those two spellings one identity.
+ *
+ * An empty model means "this provider's default", which is only identifiable by
+ * provider, so it normalizes to `provider:<name>`.
+ */
+export function normalizeModelIdentity(spec: Pick<ModelSpec, "provider" | "model">): string {
+  const raw = String(spec.model ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\/+/g, "/")
+    .replace(/^\/|\/$/g, "");
+  if (!raw) return `provider:${String(spec.provider ?? "").trim().toLowerCase()}`;
+  const parts = raw.split("/").filter(Boolean);
+  return parts.slice(-2).join("/");
+}
+
+/** Deduplicate a reviewer roster by normalized identity, preserving order. */
+export function distinctModels(roster: readonly ModelSpec[]): ModelSpec[] {
+  const seen = new Map<string, ModelSpec>();
+  for (const model of roster) {
+    const id = normalizeModelIdentity(model);
+    if (!seen.has(id)) seen.set(id, model);
+  }
+  return [...seen.values()];
+}
+
+/**
+ * Choose the next distinct reviewer model after `assigned`, wrapping ONCE.
+ *
+ * Deterministic on purpose: the same roster and the same assigned model always
+ * produce the same replacement, so a failover is reproducible from the summary
+ * rather than being a coin flip nobody can re-derive afterwards.
+ *
+ * Returns undefined when the roster offers no distinct alternative. That is a
+ * real configuration — a single-model council — and it must fail closed after the
+ * initial attempt rather than quietly retrying the model that just stalled.
+ */
+export function selectFailoverModel(params: {
+  roster: readonly ModelSpec[];
+  assigned: ModelSpec;
+}): ModelSpec | undefined {
+  const distinct = distinctModels(params.roster);
+  if (distinct.length === 0) return undefined;
+  const assignedId = normalizeModelIdentity(params.assigned);
+  const index = distinct.findIndex((m) => normalizeModelIdentity(m) === assignedId);
+  const start = index >= 0 ? index + 1 : 0;
+  for (let i = 0; i < distinct.length; i++) {
+    const candidate = distinct[(start + i) % distinct.length];
+    if (normalizeModelIdentity(candidate) !== assignedId) return candidate;
+  }
+  return undefined;
+}
+
+export interface LensRetryDecision {
+  retry: boolean;
+  /** The model the retry must use. Present only when `retry` is true. */
+  model?: ModelSpec;
+  /** True when `model` differs from the originally assigned model. */
+  failover: boolean;
+  /** Human-readable justification, logged and recorded in the attempt history. */
+  reason: string;
+}
+
+/**
+ * Decide whether — and how — to retry one failed lens attempt.
+ *
+ * Replaces the previous boolean `shouldRetryLens`, which retried every required
+ * lens failure identically. That was strictly worse than no retry for the STALL
+ * mode: the second attempt re-sent a byte-identical prompt to the model that had
+ * just hung, and burned another full wall-clock budget confirming it.
+ *
+ * `validator-review` is never retried here. It is not covered by the reviewer
+ * degradation budget either, so a retry would only delay a failure that is going
+ * to be blocking regardless.
+ */
+export function resolveLensRetry(params: {
   role?: ReviewJob["role"];
   conclusion: "success" | "failure";
+  failureClass?: PiFailureClass;
   attemptsSoFar: number;
-}): boolean {
-  if (params.conclusion !== "failure") return false;
-  if (params.role === "validator-review") return false;
-  return params.attemptsSoFar < MAX_LENS_ATTEMPTS;
+  assignedModel: ModelSpec;
+  roster: readonly ModelSpec[];
+}): LensRetryDecision {
+  const no = (reason: string): LensRetryDecision => ({ retry: false, failover: false, reason });
+
+  if (params.conclusion !== "failure") return no("the attempt succeeded");
+  if (params.role === "validator-review") {
+    return no("validator-review is not retried; its failure is blocking either way");
+  }
+  if (params.attemptsSoFar >= MAX_LENS_ATTEMPTS) {
+    return no(`the retry budget of ${MAX_LENS_ATTEMPTS} attempt(s) is exhausted`);
+  }
+
+  // An unclassified failure is treated exactly like `unknown`: no retry. Absence
+  // of a class is not evidence that a retry would help.
+  const failureClass: PiFailureClass = params.failureClass ?? "unknown";
+  const policy = FAILURE_RETRY_POLICY[failureClass] ?? FAILURE_RETRY_POLICY.unknown;
+  if (!policy.retry) {
+    return no(`failure class "${failureClass}" is not retried`);
+  }
+
+  if (policy.target === "same-model") {
+    return {
+      retry: true,
+      model: params.assignedModel,
+      failover: false,
+      reason: `failure class "${failureClass}" retries once on the same model`,
+    };
+  }
+
+  const replacement = selectFailoverModel({ roster: params.roster, assigned: params.assignedModel });
+  if (!replacement) {
+    return no(
+      `failure class "${failureClass}" requires a distinct reviewer model and the roster offers none`,
+    );
+  }
+  return {
+    retry: true,
+    model: replacement,
+    failover: true,
+    reason: `failure class "${failureClass}" retries once on the next distinct model ${replacement.label}`,
+  };
 }
 
 export interface BudgetPlanEvent {

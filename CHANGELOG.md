@@ -32,6 +32,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Per-run stream telemetry (`timeToFirstEventSeconds`, `maxIdleSecondsObserved`,
   `streamEventCount`, `malformedLineCount`, `lastEventType`) so a stall threshold
   can be calibrated from successful runs instead of guessed.
+- Typed, bounded lens retry with distinct-model failover. `stall`, `timeout`,
+  `max_turns` and `invalid_output` retry ONCE on the next distinct reviewer model;
+  `provider_transient` retries once on the same model; `provider_permanent`,
+  `process_error` and `unknown` do not retry at all. A model substitution rebuilds
+  the whole `ReviewJob`, so the replacement prompt names the replacement model and
+  receives that model's diff budget.
+- `attempts[]` in the review summary: every PHYSICAL attempt with its assigned
+  model, actual model, failover flag, failure class, cost and prompt budget.
+  `modelRuns[]` still carries one DECISIVE entry per logical lens, so quorum
+  arithmetic stays 1:1 with the council.
+
+### Changed
+
+- Retrying a failed lens no longer re-sends a byte-identical prompt to the model
+  that just failed. That was strictly worse than not retrying for a hung request:
+  it spent a second full wall-clock budget reproducing the same hang.
 
 ### Fixed
 

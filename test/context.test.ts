@@ -9,7 +9,12 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { writeFileSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { parseEntityContext, parseInputs } from "../src/github/context";
+import {
+  parseEntityContext,
+  parseInputs,
+  parseMaxDegradedLensesInput,
+  parseStallTimeoutSecondsInput,
+} from "../src/github/context";
 
 let tmp: string;
 const ENV_KEYS = [
@@ -30,6 +35,8 @@ const ENV_KEYS = [
   "INPUT_VALIDATOR_THINKING",
   "INPUT_MAX_COST_USD",
   "INPUT_RUN_TIMEOUT_SECONDS",
+  "INPUT_STALL_TIMEOUT_SECONDS",
+  "INPUT_MAX_DEGRADED_LENSES",
 ];
 const saved: Record<string, string | undefined> = {};
 
@@ -276,5 +283,70 @@ describe("parseInputs", () => {
     const inputs = parseInputs();
     expect(inputs.showCost).toBe(false);
     expect(inputs.stickyComment).toBe(false);
+  });
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * stall_timeout_seconds — FAILS CLOSED, unlike every other numeric input here.
+ * ──────────────────────────────────────────────────────────────────────────── */
+describe("parseStallTimeoutSecondsInput", () => {
+  it("resolves an unset or empty input to the documented default of 0", () => {
+    expect(parseStallTimeoutSecondsInput("")).toBe(0);
+    expect(parseStallTimeoutSecondsInput("   ")).toBe(0);
+  });
+
+  it("accepts a non-negative integer number of seconds", () => {
+    expect(parseStallTimeoutSecondsInput("0")).toBe(0);
+    expect(parseStallTimeoutSecondsInput("120")).toBe(120);
+    expect(parseStallTimeoutSecondsInput(" 45 ")).toBe(45);
+  });
+
+  it("refuses to run on a malformed value instead of silently disabling itself", () => {
+    // The failure mode this guards: `12O` (letter O) parsing as NaN, falling back
+    // to 0, and leaving every review exposed to the hang the watchdog exists to
+    // bound — behind a green log line.
+    expect(() => parseStallTimeoutSecondsInput("12O")).toThrow(/stall_timeout_seconds/);
+    expect(() => parseStallTimeoutSecondsInput("-1")).toThrow(/stall_timeout_seconds/);
+    expect(() => parseStallTimeoutSecondsInput("1.5")).toThrow(/stall_timeout_seconds/);
+    expect(() => parseStallTimeoutSecondsInput("abc")).toThrow(/stall_timeout_seconds/);
+  });
+
+  it("is wired into parseInputs and defaults to disabled", () => {
+    delete process.env.INPUT_STALL_TIMEOUT_SECONDS;
+    expect(parseInputs().stallTimeoutSeconds).toBe(0);
+    process.env.INPUT_STALL_TIMEOUT_SECONDS = "120";
+    expect(parseInputs().stallTimeoutSeconds).toBe(120);
+  });
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * max_degraded_lenses — warn-and-clamp, ALWAYS in the strict direction.
+ * ──────────────────────────────────────────────────────────────────────────── */
+describe("parseMaxDegradedLensesInput", () => {
+  it("defaults to strict when unset", () => {
+    expect(parseMaxDegradedLensesInput("")).toBe(0);
+    expect(parseMaxDegradedLensesInput("  ")).toBe(0);
+  });
+
+  it("accepts a non-negative integer tolerance", () => {
+    expect(parseMaxDegradedLensesInput("0")).toBe(0);
+    expect(parseMaxDegradedLensesInput("1")).toBe(1);
+    expect(parseMaxDegradedLensesInput(" 2 ")).toBe(2);
+  });
+
+  it("resolves anything unreadable to 0 rather than to a wider value", () => {
+    // The direction is the whole point: a typo may make the gate STRICTER, never
+    // more permissive.
+    expect(parseMaxDegradedLensesInput("-1")).toBe(0);
+    expect(parseMaxDegradedLensesInput("1.5")).toBe(0);
+    expect(parseMaxDegradedLensesInput("one")).toBe(0);
+    expect(parseMaxDegradedLensesInput("true")).toBe(0);
+  });
+
+  it("is wired into parseInputs", () => {
+    delete process.env.INPUT_MAX_DEGRADED_LENSES;
+    expect(parseInputs().maxDegradedLenses).toBe(0);
+    process.env.INPUT_MAX_DEGRADED_LENSES = "1";
+    expect(parseInputs().maxDegradedLenses).toBe(1);
   });
 });

@@ -1,13 +1,17 @@
-import type { GitHubEntityContext, PiRunResult } from "../types.js";
+import type { GitHubEntityContext, PiFailureClass, PiRunResult } from "../types.js";
+import type { CouncilPolicyResult } from "./council-policy.js";
 import type { DiffPromptBudgetReport } from "./strategy.js";
 import type { ReviewCost, ReviewCostTotal } from "./cost.js";
 import type { PostSummary } from "../entrypoints/post-buffered.js";
 import { uniqueFindingId, type ParsedReviewFinding } from "./findings.js";
 
+export type ReviewRunRole = "reviewer" | "validator-review" | "validator";
+
 export interface ReviewRunMetric {
-  role: "reviewer" | "validator-review" | "validator";
+  role: ReviewRunRole;
   lensId?: string;
   lensTitle?: string;
+  /** The model the DECISIVE attempt actually ran on. */
   modelLabel: string;
   conclusion: "success" | "failure";
   turnsUsed: number;
@@ -18,6 +22,56 @@ export interface ReviewRunMetric {
   costUsd: number;
   costEstimated: boolean;
   pricingSource: ReviewCost["source"];
+  /**
+   * Additive, optional fields (EHAC-2231). One entry per LOGICAL lens is
+   * preserved so quorum arithmetic stays 1:1 with the council; these describe how
+   * that one entry was reached without splitting it into two.
+   */
+  failureClass?: PiFailureClass;
+  /** The model this lens was originally assigned, before any failover. */
+  assignedModelLabel?: string;
+  /** The model the decisive attempt ran on. Equals modelLabel; named for the census. */
+  actualModelLabel?: string;
+  /** True when the decisive attempt ran on a replacement model. */
+  failoverUsed?: boolean;
+  /** Physical attempts spent on this logical lens (1 or 2). */
+  attemptCount?: number;
+}
+
+/**
+ * One PHYSICAL attempt.
+ *
+ * Separate from `ReviewRunMetric` on purpose. A retried lens is still ONE lens
+ * for quorum purposes but TWO executions for cost, latency and diagnosis, and
+ * folding them together is what made the previous retry invisible in the record:
+ * `retriedLensIds` said a retry happened but not what it cost, what it changed,
+ * or why it was attempted.
+ */
+export interface ReviewAttemptMetric {
+  lensId: string;
+  lensTitle?: string;
+  role: ReviewRunRole;
+  /** 1-based within this logical lens. */
+  attempt: number;
+  assignedModel: string;
+  actualModel: string;
+  failover: boolean;
+  conclusion: "success" | "failure";
+  failureClass?: PiFailureClass;
+  terminationReason?: string;
+  durationSeconds: number;
+  turnsUsed: number;
+  providerRetries: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  /** What the packer actually gave THIS attempt's prompt. */
+  promptBudget?: DiffPromptBudgetReport;
+  timeToFirstEventSeconds?: number | null;
+  maxIdleSecondsObserved?: number;
+  streamEventCount?: number;
+  malformedLineCount?: number;
+  lastEventType?: string;
 }
 
 export interface ReviewSummaryInput {
@@ -46,17 +100,44 @@ export interface ReviewSummaryInput {
   promptBudgets?: DiffPromptBudgetReport[];
   /** Lens IDs that failed once and were retried. */
   retriedLensIds?: string[];
+  /** Every physical attempt, in completion order. Additive; `version` stays 1. */
+  attempts?: ReviewAttemptMetric[];
+  /**
+   * WHICH supported terminal path emitted this summary. A consumer that has to
+   * distinguish "the review declined" from "the review broke before it started"
+   * currently has to infer it from an empty output, and inferring a decline from
+   * an absence is the fail-open this whole record exists to remove.
+   */
+  terminalReason?: string;
+  /** Set only on an explicit decline. Zero runs plus any other reason is a failure. */
+  skipReason?: string;
+  /** Human-readable failure detail for a failure summary. */
+  failureMessage?: string;
+  /**
+   * The degraded-reviewer-lens tolerance this run actually applied, so a
+   * downstream gate can detect producer/gate policy drift instead of assuming
+   * two independently-defaulted values happen to agree.
+   */
+  councilPolicy?: CouncilPolicyResult;
 }
 
 export function metricFromPiRun(
   result: PiRunResult,
   role: ReviewRunMetric["role"],
-  metadata: { lensId?: string; lensTitle?: string } = {},
+  metadata: {
+    lensId?: string;
+    lensTitle?: string;
+    assignedModelLabel?: string;
+    actualModelLabel?: string;
+    failoverUsed?: boolean;
+    attemptCount?: number;
+  } = {},
 ): ReviewRunMetric {
   return {
     role,
     ...metadata,
     modelLabel: result.usage.modelLabel,
+    ...(result.failureClass ? { failureClass: result.failureClass } : {}),
     conclusion: result.conclusion,
     turnsUsed: result.turnsUsed,
     providerRetries: result.providerRetries,
@@ -109,6 +190,9 @@ export function buildReviewSummary(input: ReviewSummaryInput) {
       finalModel: input.finalModelLabel,
       branchName: input.branchName || "",
       commentId: input.commentId ? String(input.commentId) : "",
+      terminalReason: input.terminalReason ?? "completed",
+      skipReason: input.skipReason ?? "",
+      failureMessage: input.failureMessage ?? "",
     },
     inlineComments,
     findings: (input.findings ?? []).map((finding, index) => ({
@@ -123,8 +207,10 @@ export function buildReviewSummary(input: ReviewSummaryInput) {
       runs: input.costTotal.runs.map((run) => costRunSummary(run)),
     },
     modelRuns: input.runs,
+    attempts: input.attempts ?? [],
     promptBudgets: input.promptBudgets ?? [],
     retriedLensIds: input.retriedLensIds ?? [],
+    councilPolicy: input.councilPolicy ?? null,
   };
 }
 

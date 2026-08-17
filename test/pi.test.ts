@@ -2,7 +2,14 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { __buildPiEnv, buildPiArgs, runPi } from "../src/pi";
+import {
+  __buildPiEnv,
+  buildPiArgs,
+  classifyProviderStatus,
+  classifyRunFailure,
+  providerStatusFromEvent,
+  runPi,
+} from "../src/pi";
 import type { ActionInputs } from "../src/types";
 
 const baseInputs: ActionInputs = {
@@ -14,6 +21,7 @@ const baseInputs: ActionInputs = {
   systemPrompt: "",
   maxTurns: 20,
   runTimeoutSeconds: 600,
+  stallTimeoutSeconds: 0,
   tools: "read,grep,find,ls",
   configPath: ".elek.yml",
   branchPrefix: "elek/",
@@ -280,4 +288,456 @@ describe("runPi", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Stream-idle watchdog + failure taxonomy (EHAC-2231, D1).
+ *
+ * A one-second threshold keeps these honest AND fast: every case below asserts
+ * that termination happens NEAR the threshold, which is the property that
+ * separates a working watchdog from a wall-clock timer with a new name.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Write an executable fake pi and point PI_EXECUTABLE at it. */
+function fakePi(prefix: string, lines: string[]): { dir: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), `elek-${prefix}-`));
+  const bin = join(dir, "pi");
+  writeFileSync(bin, lines.join("\n") + "\n", "utf-8");
+  chmodSync(bin, 0o755);
+  process.env.PI_EXECUTABLE = bin;
+  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+const okAssistant =
+  "{ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text: 'review body' }], stopReason: 'stop' }] }";
+
+describe("classifyProviderStatus", () => {
+  it("maps rate limits and server errors to a retryable transient class", () => {
+    expect(classifyProviderStatus(429)).toBe("provider_transient");
+    expect(classifyProviderStatus(503)).toBe("provider_transient");
+    expect(classifyProviderStatus(529)).toBe("provider_transient");
+    expect(classifyProviderStatus(599)).toBe("provider_transient");
+  });
+
+  it("maps auth and configuration statuses to a permanent class", () => {
+    expect(classifyProviderStatus(401)).toBe("provider_permanent");
+    expect(classifyProviderStatus(403)).toBe("provider_permanent");
+    expect(classifyProviderStatus(404)).toBe("provider_permanent");
+  });
+
+  it("refuses to classify anything that is not a structured integer status", () => {
+    expect(classifyProviderStatus("429")).toBeUndefined();
+    expect(classifyProviderStatus("rate_limit_exceeded")).toBeUndefined();
+    expect(classifyProviderStatus(undefined)).toBeUndefined();
+    expect(classifyProviderStatus(200)).toBeUndefined();
+    expect(classifyProviderStatus(4.29)).toBeUndefined();
+  });
+});
+
+describe("providerStatusFromEvent", () => {
+  it("reads a status from each supported structured container", () => {
+    expect(providerStatusFromEvent({ type: "error", status: 429 })).toBe(429);
+    expect(providerStatusFromEvent({ type: "x", error: { statusCode: 503 } })).toBe(503);
+    expect(
+      providerStatusFromEvent({ type: "message_update", assistantMessageEvent: { error: { status: 401 } } }),
+    ).toBe(401);
+    expect(providerStatusFromEvent({ type: "message_end", message: { error: { http_status: 500 } } })).toBe(500);
+  });
+
+  it("returns nothing for prose-only errors — the class must not be guessed from text", () => {
+    expect(
+      providerStatusFromEvent({ type: "message_end", message: { errorMessage: "429 Too Many Requests" } }),
+    ).toBeUndefined();
+    expect(providerStatusFromEvent({ type: "error", code: "rate_limit_exceeded" })).toBeUndefined();
+  });
+});
+
+describe("classifyRunFailure", () => {
+  it("prefers the kill reason over everything else, so a stall stays a stall", () => {
+    expect(
+      classifyRunFailure({
+        terminationReason: "stall",
+        providerFailureClass: "provider_transient",
+        exitCode: null,
+        hasOutput: true,
+      }),
+    ).toBe("stall");
+  });
+
+  it("falls through the documented order when elek did not kill the child", () => {
+    expect(
+      classifyRunFailure({ providerFailureClass: "provider_permanent", exitCode: 1, hasOutput: false }),
+    ).toBe("provider_permanent");
+    expect(classifyRunFailure({ exitCode: 1, hasOutput: true })).toBe("process_error");
+    expect(classifyRunFailure({ exitCode: 0, hasOutput: false })).toBe("invalid_output");
+    expect(classifyRunFailure({ exitCode: 0, hasOutput: true })).toBe("unknown");
+  });
+});
+
+describe("runPi stream-idle watchdog", () => {
+  it("never fires while valid events keep arriving inside the threshold", async () => {
+    const { cleanup } = fakePi("stall-reset", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      "setTimeout(() => emit({ type: 'turn_start' }), 1200);",
+      "setTimeout(() => emit({ type: 'tool_execution_start', toolName: 'read' }), 2400);",
+      `setTimeout(() => { emit(${okAssistant}); process.exit(0); }, 3200);`,
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 30, stallTimeoutSeconds: 3 },
+        undefined,
+        false,
+        { promptName: "stall-reset" },
+      );
+
+      expect(result.conclusion).toBe("success");
+      expect(result.failureClass).toBeUndefined();
+      expect(result.terminationReason).toBeUndefined();
+      // The run outlived the threshold; no single GAP did. That distinction is
+      // the entire point of an idle timer over a wall-clock timer.
+      expect(result.durationSeconds).toBeGreaterThan(2);
+      expect(result.maxIdleSecondsObserved!).toBeGreaterThan(1);
+      expect(result.maxIdleSecondsObserved!).toBeLessThan(3);
+      expect(result.streamEventCount!).toBeGreaterThanOrEqual(4);
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("terminates near the threshold with failureClass=stall when events stop mid-run", async () => {
+    const { cleanup } = fakePi("stall-mid", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      "emit({ type: 'turn_start' });",
+      "setInterval(() => {}, 1000);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 60, stallTimeoutSeconds: 1 },
+        undefined,
+        false,
+        { promptName: "stall-mid" },
+      );
+
+      expect(result.conclusion).toBe("failure");
+      expect(result.failureClass).toBe("stall");
+      expect(result.terminationReason).toBe("stall");
+      expect(result.output).toBe("pi stalled: no valid stream activity for 1s");
+      // NEAR the threshold, not at the 60s wall clock. If this ever climbs to
+      // ~60 the watchdog has stopped working and only the message survives.
+      expect(result.durationSeconds).toBeLessThan(5);
+      expect(result.timeToFirstEventSeconds).not.toBeNull();
+      expect(result.lastEventType).toBe("turn_start");
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("reports a time-to-first-event stall when nothing is ever emitted", async () => {
+    const { cleanup } = fakePi("stall-first", [
+      "#!/usr/bin/env node",
+      "setInterval(() => {}, 1000);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 60, stallTimeoutSeconds: 1 },
+        undefined,
+        false,
+        { promptName: "stall-first" },
+      );
+
+      expect(result.failureClass).toBe("stall");
+      expect(result.timeToFirstEventSeconds).toBeNull();
+      expect(result.streamEventCount).toBe(0);
+      expect(result.durationSeconds).toBeLessThan(5);
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("counts malformed lines without letting them hold a broken JSON-mode run open", async () => {
+    const { cleanup } = fakePi("stall-garbage", [
+      "#!/usr/bin/env node",
+      "setInterval(() => console.log('not json at all'), 100);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 60, stallTimeoutSeconds: 1 },
+        undefined,
+        false,
+        { promptName: "stall-garbage" },
+      );
+
+      expect(result.failureClass).toBe("stall");
+      // The property is not "how many lines" — it is that garbage arriving
+      // CONTINUOUSLY did not hold the run open. The stall still fired near the
+      // 1s threshold while stdout was never quiet.
+      expect(result.malformedLineCount!).toBeGreaterThanOrEqual(1);
+      expect(result.streamEventCount).toBe(0);
+      expect(result.durationSeconds).toBeLessThan(5);
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("does not false-stall a healthy text-mode fallback that emits no JSON", async () => {
+    const previous = process.env.ELEK_PI_TEXT_MODE;
+    process.env.ELEK_PI_TEXT_MODE = "1";
+    const { cleanup } = fakePi("stall-text", [
+      "#!/usr/bin/env node",
+      "setTimeout(() => { process.stdout.write('buffered review body\\n'); process.exit(0); }, 2600);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 30, stallTimeoutSeconds: 1 },
+        undefined,
+        false,
+        { promptName: "stall-text" },
+      );
+
+      expect(result.conclusion).toBe("success");
+      expect(result.output).toBe("buffered review body");
+      expect(result.failureClass).toBeUndefined();
+    } finally {
+      cleanup();
+      if (previous === undefined) delete process.env.ELEK_PI_TEXT_MODE;
+      else process.env.ELEK_PI_TEXT_MODE = previous;
+    }
+  }, 20_000);
+
+  it("lets the wall clock win when the stream is active but the run is simply too long", async () => {
+    const { cleanup } = fakePi("stall-vs-timeout", [
+      "#!/usr/bin/env node",
+      "process.on('SIGTERM', () => process.exit(0));",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      "setInterval(() => emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '.' } }), 200);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 2, stallTimeoutSeconds: 5 },
+        undefined,
+        false,
+        { promptName: "stall-vs-timeout" },
+      );
+
+      expect(result.conclusion).toBe("failure");
+      expect(result.failureClass).toBe("timeout");
+      expect(result.terminationReason).toBe("timeout");
+      expect(result.streamEventCount!).toBeGreaterThan(5);
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("keeps max_turns distinguishable from stall and timeout", async () => {
+    const { cleanup } = fakePi("stall-vs-turns", [
+      "#!/usr/bin/env node",
+      "process.on('SIGTERM', () => process.exit(0));",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'turn_start' });",
+      "emit({ type: 'turn_start' });",
+      "emit({ type: 'turn_start' });",
+      "setInterval(() => {}, 1000);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, maxTurns: 2, runTimeoutSeconds: 30, stallTimeoutSeconds: 5 },
+        undefined,
+        false,
+        { promptName: "stall-vs-turns" },
+      );
+
+      expect(result.failureClass).toBe("max_turns");
+      expect(result.terminationReason).toBe("max_turns");
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("preserves the first failure class through SIGTERM -> SIGKILL escalation", async () => {
+    const { cleanup } = fakePi("stall-sigkill", [
+      "#!/usr/bin/env node",
+      // Deliberately ignores SIGTERM: settlement must come from the SIGKILL path,
+      // and the class recorded at kill time must survive it.
+      "process.on('SIGTERM', () => {});",
+      "console.log(JSON.stringify({ type: 'session', id: 's' }));",
+      "setInterval(() => {}, 1000);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 60, stallTimeoutSeconds: 1 },
+        undefined,
+        false,
+        { promptName: "stall-sigkill" },
+      );
+
+      expect(result.failureClass).toBe("stall");
+      expect(result.terminationReason).toBe("stall");
+      expect(result.durationSeconds).toBeLessThan(8);
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("settles exactly once when the child exits as the wall-clock timer fires", async () => {
+    const { cleanup } = fakePi("stall-race", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      `setTimeout(() => { emit(${okAssistant}); process.exit(0); }, 1000);`,
+    ]);
+    try {
+      const doneEvents: string[] = [];
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 1, stallTimeoutSeconds: 1 },
+        async (event) => {
+          if (event.type === "done") doneEvents.push(event.type);
+        },
+        false,
+        { promptName: "stall-race" },
+      );
+
+      expect(doneEvents.length).toBe(1);
+      // Whichever side won, exactly ONE class is reported and it is a legal one.
+      if (result.conclusion === "failure") {
+        expect(["stall", "timeout"]).toContain(result.failureClass);
+      } else {
+        expect(result.failureClass).toBeUndefined();
+      }
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("clears every timer on settlement, so nothing can rewrite the result afterwards", async () => {
+    const { cleanup } = fakePi("stall-cleanup", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      `emit(${okAssistant});`,
+      "process.exit(0);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 2, stallTimeoutSeconds: 1 },
+        undefined,
+        false,
+        { promptName: "stall-cleanup" },
+      );
+
+      expect(result.conclusion).toBe("success");
+      const snapshot = JSON.stringify(result);
+      // Outlive BOTH timers. A live idle or wall-clock timer would fire in here.
+      await new Promise((r) => setTimeout(r, 2600));
+      expect(JSON.stringify(result)).toBe(snapshot);
+      expect(result.conclusion).toBe("success");
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("classifies a child that cannot be spawned as process_error", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "elek-stall-spawn-"));
+    const bin = join(dir, "pi");
+    writeFileSync(bin, "not executable", "utf-8");
+    chmodSync(bin, 0o644);
+    process.env.PI_EXECUTABLE = bin;
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 5, stallTimeoutSeconds: 1 },
+        undefined,
+        false,
+        { promptName: "stall-spawn" },
+      );
+
+      expect(result.conclusion).toBe("failure");
+      expect(result.failureClass).toBe("process_error");
+      expect(result.terminationReason).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("classifies a clean exit with no usable output as invalid_output", async () => {
+    const { cleanup } = fakePi("stall-empty", [
+      "#!/usr/bin/env node",
+      "console.log(JSON.stringify({ type: 'session', id: 's' }));",
+      "process.exit(0);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 10, stallTimeoutSeconds: 5 },
+        undefined,
+        false,
+        { promptName: "stall-empty" },
+      );
+
+      expect(result.conclusion).toBe("failure");
+      expect(result.failureClass).toBe("invalid_output");
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("classifies a structured provider status observed on the stream", async () => {
+    const { cleanup } = fakePi("stall-provider", [
+      "#!/usr/bin/env node",
+      "console.log(JSON.stringify({ type: 'session', id: 's' }));",
+      "console.log(JSON.stringify({ type: 'error', status: 429, message: 'slow down' }));",
+      "process.exit(1);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 10, stallTimeoutSeconds: 5 },
+        undefined,
+        false,
+        { promptName: "stall-provider" },
+      );
+
+      expect(result.conclusion).toBe("failure");
+      expect(result.failureClass).toBe("provider_transient");
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("disables the watchdog entirely when stall_timeout_seconds is 0", async () => {
+    const { cleanup } = fakePi("stall-off", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      `setTimeout(() => { emit(${okAssistant}); process.exit(0); }, 2500);`,
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 30, stallTimeoutSeconds: 0 },
+        undefined,
+        false,
+        { promptName: "stall-off" },
+      );
+
+      expect(result.conclusion).toBe("success");
+      // Telemetry is still emitted while the watchdog is off — that is what the
+      // canary uses to CHOOSE a threshold before enabling it anywhere.
+      expect(result.maxIdleSecondsObserved!).toBeGreaterThan(2);
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
 });

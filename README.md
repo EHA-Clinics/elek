@@ -339,6 +339,8 @@ Full architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | `system_prompt` | _(pi default)_ | Override pi's system prompt |
 | `max_turns` | `20` | Cap conversation turns |
 | `run_timeout_seconds` | `600` | Wall-clock timeout for each model run; keep the job timeout higher so elek can update the tracking comment |
+| `stall_timeout_seconds` | `0` | Stream-idle watchdog. Terminates a run that emitted no valid pi stream event for this long and classifies it `stall`, distinct from `timeout`. `0` disables it. Ignored in `ELEK_PI_TEXT_MODE`. A non-integer or negative value refuses to run |
+| `max_degraded_lenses` | `0` | How many reviewer lenses may fail while the review still completes. Validator roles never consume it; a wiped reviewer panel, an unclassifiable failed run, or a value not below the reviewer count still fail. Invalid values resolve to `0` |
 | `tools` | _(mode-resolved)_ | Legacy low-level allowlist; review modes use `mode` presets |
 | `base_branch` | _(repo default)_ | Override the comparison base |
 | `branch_prefix` | `elek/` | Prefix for branches the action creates |

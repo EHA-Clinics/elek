@@ -81,6 +81,29 @@ inputs:
     description: "Wall-clock timeout for each model run. elek reports a failure review before the outer GitHub step timeout can leave a stale tracking comment."
     required: false
     default: "600"
+  stall_timeout_seconds:
+    description: >
+      Stream-idle watchdog, in seconds. Terminates a model run that has emitted
+      no valid pi stream event for this long, and reports it as failure class
+      `stall` — distinct from `timeout`, which means the wall-clock budget above
+      expired while work was still arriving.
+
+      Default "0" (disabled), so an existing consumer is byte-identical to
+      before. Pick a value from measured telemetry, not intuition: every run now
+      reports `timeToFirstEventSeconds` and `maxIdleSecondsObserved`, and a safe
+      threshold is several times the p99 idle gap of SUCCESSFUL runs while still
+      below run_timeout_seconds. A threshold set too low turns healthy slow work
+      into a false stall.
+
+      Ignored in ELEK_PI_TEXT_MODE: `pi -p` returns one buffered answer at the
+      end of a run, so a gap-based timer cannot tell a healthy text-mode run from
+      a hung one.
+
+      An empty value means the default. A value that is not a non-negative
+      integer is a configuration FAILURE and refuses to run — a watchdog that
+      silently disables itself on a typo is not a watchdog.
+    required: false
+    default: "0"
   tools:
     description: "Legacy low-level pi tool allowlist. Review modes use mode presets; prefer mode unless debugging agent mode."
     required: false
@@ -147,6 +170,29 @@ inputs:
       example: security-correctness,contract-drift,mobile-runtime.
     required: false
     default: ""
+  max_degraded_lenses:
+    description: >
+      How many reviewer lenses may fail while the review still completes.
+
+      Default "0" — strict, and byte-identical to every previous release. A
+      council is a redundancy mechanism; scoring it by unanimity-of-availability
+      throws that redundancy away, so one hung request blocks the pull request.
+      Raise it to make a single reviewer dropout non-blocking.
+
+      Never consumed by validator roles. A failed `validator-review` or final
+      validator means nothing independently audited or reconciled the findings,
+      which is an ABSENT review rather than a degraded one, and still fails.
+      Neither is a wiped reviewer panel, an unclassifiable failed run, or a value
+      that is not below the reviewer lens count.
+
+      Fails CLOSED: an invalid, negative or fractional value resolves to 0 with a
+      warning. A misconfigured tolerance must never widen what the review accepts.
+
+      A degraded run exits successfully but is never silent — it emits a warning
+      naming every failed lens, its assigned model, its actual model and its
+      terminal failure class.
+    required: false
+    default: "0"
   review_agent_count:
     description: >
       Optional number of parallel reviewer agents for review_strategy=thermos.
@@ -285,6 +331,7 @@ runs:
         INPUT_SYSTEM_PROMPT: ${{ inputs.system_prompt }}
         INPUT_MAX_TURNS: ${{ inputs.max_turns }}
         INPUT_RUN_TIMEOUT_SECONDS: ${{ inputs.run_timeout_seconds }}
+        INPUT_STALL_TIMEOUT_SECONDS: ${{ inputs.stall_timeout_seconds }}
         INPUT_TOOLS: ${{ inputs.tools }}
         INPUT_CONFIG_PATH: ${{ inputs.config_path }}
         INPUT_BASE_BRANCH: ${{ inputs.base_branch }}
@@ -296,6 +343,7 @@ runs:
         INPUT_REVIEW_STRATEGY: ${{ inputs.review_strategy }}
         INPUT_REVIEW_MODELS: ${{ inputs.review_models }}
         INPUT_REVIEW_LENSES: ${{ inputs.review_lenses }}
+        INPUT_MAX_DEGRADED_LENSES: ${{ inputs.max_degraded_lenses }}
         INPUT_REVIEW_AGENT_COUNT: ${{ inputs.review_agent_count }}
         INPUT_ADVISOR_MODEL: ${{ inputs.advisor_model }}
         INPUT_ADVISOR_THINKING: ${{ inputs.advisor_thinking }}

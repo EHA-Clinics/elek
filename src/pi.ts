@@ -25,7 +25,12 @@ import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { createInterface } from "readline";
-import type { ActionInputs, PiRunResult } from "./types";
+import type {
+  ActionInputs,
+  PiFailureClass,
+  PiRunResult,
+  PiTerminationReason,
+} from "./types";
 import { estimateRunCost, modelLabelFor, resolveRates, type ReviewCost } from "./review/cost";
 
 const REVIEW_SYSTEM_PROMPT = [
@@ -96,6 +101,105 @@ function findPiBinary(): string {
   return "pi";
 }
 
+/**
+ * HTTP statuses that a single retry on the SAME model can plausibly clear.
+ * 529 is Anthropic's overloaded status; the rest are standard.
+ */
+const TRANSIENT_PROVIDER_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
+
+/** HTTP statuses that mean the request will fail identically next time. */
+const PERMANENT_PROVIDER_STATUSES = new Set([400, 401, 402, 403, 404, 405, 413, 422]);
+
+/**
+ * Map a STRUCTURED provider status onto a failure class.
+ *
+ * Numbers only, deliberately. A provider "code" is often a string slug
+ * (`rate_limit_exceeded`, `insufficient_quota`) whose vocabulary is undocumented
+ * and provider-specific, and matching those — or worse, matching the sanitized
+ * message text — is how retry policy silently starts firing on the wrong thing.
+ * Anything unrecognised returns undefined, which the caller turns into
+ * `unknown`, which is never retried.
+ */
+export function classifyProviderStatus(status: unknown): PiFailureClass | undefined {
+  if (typeof status !== "number" || !Number.isInteger(status)) return undefined;
+  if (TRANSIENT_PROVIDER_STATUSES.has(status)) return "provider_transient";
+  if (PERMANENT_PROVIDER_STATUSES.has(status)) return "provider_permanent";
+  if (status >= 500 && status <= 599) return "provider_transient";
+  if (status >= 400 && status <= 499) return "provider_permanent";
+  return undefined;
+}
+
+/** The fixed key set searched for a numeric HTTP status on a structured error object. */
+const PROVIDER_STATUS_KEYS = ["status", "statusCode", "httpStatus", "http_status", "code"] as const;
+
+function numericStatusOn(container: unknown): number | undefined {
+  if (!container || typeof container !== "object") return undefined;
+  const record = container as Record<string, unknown>;
+  for (const key of PROVIDER_STATUS_KEYS) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isInteger(value)) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Pull a numeric provider status out of a parsed pi stream event.
+ *
+ * The searched paths are a CLOSED list of structured containers. If pi ever
+ * moves the field, this returns undefined and the run classifies as `unknown` —
+ * it fails closed (no retry) rather than guessing.
+ */
+export function providerStatusFromEvent(event: unknown): number | undefined {
+  if (!event || typeof event !== "object") return undefined;
+  const e = event as Record<string, any>;
+  const candidates: unknown[] = [
+    e.error,
+    e.providerError,
+    e.assistantMessageEvent?.error,
+    e.message?.error,
+    e.result?.error,
+    e.type === "error" ? e : undefined,
+  ];
+  for (const candidate of candidates) {
+    const status = numericStatusOn(candidate);
+    if (status !== undefined) return status;
+  }
+  return undefined;
+}
+
+/**
+ * Decide ONE terminal class for a failed pi run, most-specific fact first.
+ *
+ * The order is the whole contract, because it is what keeps a stall from being
+ * relabelled by whatever happened afterwards:
+ *
+ *  1. elek killed the child          -> the kill reason (stall | timeout | max_turns)
+ *  2. a structured provider status   -> provider_transient | provider_permanent
+ *  3. non-zero / signalled exit      -> process_error
+ *  4. clean exit, nothing usable     -> invalid_output
+ *  5. clean exit, output, error stop -> unknown  (never retried)
+ *
+ * Step 5 is deliberately `unknown` rather than a guess. An error stop reason with
+ * no structured status is exactly the case where inferring from prose would be
+ * tempting and wrong.
+ */
+export function classifyRunFailure(args: {
+  terminationReason?: PiTerminationReason;
+  providerFailureClass?: PiFailureClass;
+  exitCode: number | null;
+  hasOutput: boolean;
+}): PiFailureClass {
+  if (args.terminationReason) return args.terminationReason;
+  if (args.providerFailureClass) return args.providerFailureClass;
+  if (args.exitCode !== 0) return "process_error";
+  if (!args.hasOutput) return "invalid_output";
+  return "unknown";
+}
+
+function roundSeconds(value: number): number {
+  return Math.round(Math.max(0, value) * 10) / 10;
+}
+
 function killPiProcess(pid: number | undefined, signal: NodeJS.Signals): void {
   if (!pid) return;
   try {
@@ -155,7 +259,18 @@ export async function runPi(
   let finalAssistant: PiAssistantMessage | undefined;
   let lastErrorMessage: string | undefined;
   let terminationMessage: string | undefined;
+  let terminationReason: PiTerminationReason | undefined;
+  /** Established from STRUCTURED provider state only — never from message text. */
+  let providerFailureClass: PiFailureClass | undefined;
   let settled = false;
+  // Stream-idle telemetry. Emitted on every terminal path so the watchdog
+  // threshold can be calibrated from successful runs rather than guessed.
+  let firstEventAt: number | undefined;
+  let lastActivityAt = Date.now();
+  let maxIdleSeconds = 0;
+  let streamEventCount = 0;
+  let malformedLineCount = 0;
+  let lastEventType: string | undefined;
   // Streaming text deltas — used as a fallback if agent_end is missing.
   // Reset at every turn_start so we keep only the last turn's text.
   let streamingText = "";
@@ -183,10 +298,24 @@ export async function runPi(
       detached: process.platform !== "win32",
     });
     let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
-    const terminatePi = (message: string) => {
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const clearIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = undefined;
+    };
+
+    // The FIRST terminal condition wins. A later timer callback — or a close
+    // that races a kill — can never rewrite the class, because every writer goes
+    // through here and here is guarded. Without that guard the wall-clock timer
+    // firing one tick after a stall kill would relabel a stall as a timeout, and
+    // the retry policy would pick the wrong recovery.
+    const terminatePi = (message: string, reason: PiTerminationReason) => {
       if (terminationMessage || settled) return;
       terminationMessage = message;
+      terminationReason = reason;
       console.error(message);
+      clearIdleTimer();
       killPiProcess(child.pid, "SIGTERM");
       forceKillTimer = setTimeout(() => {
         if (!settled && child.exitCode === null) {
@@ -194,11 +323,77 @@ export async function runPi(
         }
       }, 1000);
     };
+
     const timeoutMs = inputs.runTimeoutSeconds * 1000;
     const timeoutTimer = setTimeout(
-      () => terminatePi(`pi timed out after ${inputs.runTimeoutSeconds}s`),
+      () => terminatePi(`pi timed out after ${inputs.runTimeoutSeconds}s`, "timeout"),
       timeoutMs,
     );
+
+    // ── Stream-idle watchdog (INDEPENDENT of the wall clock above) ────────────
+    //
+    // One wall-clock timer cannot distinguish a hung provider request from
+    // genuinely slow work: both burn the full budget and both report `timeout`.
+    // Measured on eha_care PR #3291 (job 95521213463), a 3,612-character prompt
+    // produced 600s of complete silence, then a retry produced another 600s of
+    // the same. The idle timer separates those two populations by asking a
+    // different question — "when did we last hear anything?" — and terminates a
+    // silent child near the threshold instead of at the cap.
+    //
+    // In ELEK_PI_TEXT_MODE the watchdog is DISABLED, not merely re-sourced.
+    // `pi -p` returns one buffered answer at the end of the run, so a healthy
+    // text-mode review legitimately emits nothing for its entire duration and a
+    // gap-based timer would kill it. Text mode is the emergency fallback; a
+    // watchdog that breaks the fallback is worse than no watchdog there.
+    const stallTimeoutSeconds = Math.max(0, inputs.stallTimeoutSeconds ?? 0);
+    const idleWatchdogEnabled = stallTimeoutSeconds > 0 && useJsonMode;
+    if (stallTimeoutSeconds > 0 && !useJsonMode) {
+      console.warn(
+        "stall watchdog disabled: ELEK_PI_TEXT_MODE emits no incremental stream, " +
+          "so a gap-based timer cannot tell a healthy buffered run from a hung one.",
+      );
+    }
+
+    const armIdleTimer = () => {
+      if (!idleWatchdogEnabled) return;
+      // Clear-then-set, never set-alongside: two live idle timers would make the
+      // effective threshold whichever one happened to be older.
+      clearIdleTimer();
+      idleTimer = setTimeout(() => {
+        maxIdleSeconds = Math.max(maxIdleSeconds, (Date.now() - lastActivityAt) / 1000);
+        terminatePi(
+          `pi stalled: no valid stream activity for ${stallTimeoutSeconds}s`,
+          "stall",
+        );
+      }, stallTimeoutSeconds * 1000);
+    };
+
+    /** Record one unit of stream progress and restart the idle countdown. */
+    const noteStreamActivity = (eventType?: string) => {
+      const now = Date.now();
+      maxIdleSeconds = Math.max(maxIdleSeconds, (now - lastActivityAt) / 1000);
+      lastActivityAt = now;
+      if (firstEventAt === undefined) firstEventAt = now;
+      streamEventCount++;
+      if (eventType) lastEventType = eventType;
+      armIdleTimer();
+    };
+
+    /** Freeze telemetry at settlement, including the trailing silent gap. */
+    const streamTelemetry = () => {
+      maxIdleSeconds = Math.max(maxIdleSeconds, (Date.now() - lastActivityAt) / 1000);
+      return {
+        timeToFirstEventSeconds:
+          firstEventAt === undefined ? null : roundSeconds((firstEventAt - startTime) / 1000),
+        maxIdleSecondsObserved: roundSeconds(maxIdleSeconds),
+        streamEventCount,
+        malformedLineCount,
+        ...(lastEventType ? { lastEventType } : {}),
+      };
+    };
+
+    lastActivityAt = Date.now();
+    armIdleTimer();
 
     let stderr = "";
     let stdoutRaw = "";
@@ -208,9 +403,12 @@ export async function runPi(
     });
 
     if (!useJsonMode) {
-      // Text mode: just collect stdout as the assistant's review text.
+      // Text mode: just collect stdout as the assistant's review text. Chunks
+      // still count as activity so the telemetry is comparable across modes,
+      // even though the idle watchdog is disabled here (see above).
       child.stdout!.on("data", (chunk) => {
         stdoutRaw += chunk.toString();
+        noteStreamActivity("stdout_chunk");
       });
     }
 
@@ -223,7 +421,26 @@ export async function runPi(
       try {
         event = JSON.parse(line);
       } catch {
-        return; // non-JSON line (warnings, etc.)
+        // Non-JSON line (warnings, banner text). COUNTED for diagnostics, but
+        // deliberately NOT treated as activity: a process wedged in a loop that
+        // prints garbage would otherwise hold the watchdog open forever, which
+        // is the exact failure the watchdog exists to bound.
+        malformedLineCount++;
+        return;
+      }
+
+      // Every successfully parsed event resets the countdown — not a hand-picked
+      // subset. Selecting event types would make the threshold depend on which
+      // phase pi happens to be in, so a long tool execution or a long thinking
+      // block would false-stall while a genuinely hung request in an unselected
+      // phase would not be caught.
+      noteStreamActivity(typeof event?.type === "string" ? event.type : undefined);
+
+      // Structured provider status, if this event carries one. Recorded rather
+      // than acted on: the terminal class is decided once, at settlement.
+      const providerStatus = providerStatusFromEvent(event);
+      if (providerStatus !== undefined && providerFailureClass === undefined) {
+        providerFailureClass = classifyProviderStatus(providerStatus);
       }
 
       switch (event.type) {
@@ -235,7 +452,7 @@ export async function runPi(
           turnCount++;
           streamingText = "";
           if (turnCount > inputs.maxTurns) {
-            terminatePi(`pi exceeded max turns (${inputs.maxTurns})`);
+            terminatePi(`pi exceeded max turns (${inputs.maxTurns})`, "max_turns");
           }
           break;
 
@@ -304,10 +521,17 @@ export async function runPi(
       if (settled) return;
       settled = true;
       clearTimeout(timeoutTimer);
+      clearIdleTimer();
       if (forceKillTimer) clearTimeout(forceKillTimer);
+      const telemetry = streamTelemetry();
       const elapsed = (Date.now() - startTime) / 1000;
       console.log(
         `pi exited code=${code} in ${elapsed.toFixed(1)}s · turns=${turnCount} · tools=${toolCount} · provider retries=${providerRetries}`,
+      );
+      console.log(
+        `pi stream: events=${telemetry.streamEventCount} · malformed_lines=${telemetry.malformedLineCount} · ` +
+          `time_to_first_event=${telemetry.timeToFirstEventSeconds ?? "none"}s · max_idle=${telemetry.maxIdleSecondsObserved}s · ` +
+          `last_event=${telemetry.lastEventType ?? "none"}`,
       );
 
       // AWAIT the final progress update — otherwise it races with run.ts's
@@ -347,6 +571,7 @@ export async function runPi(
             modelLabel: usage.modelLabel,
             source: usage.source,
           },
+          ...telemetry,
         });
       } else {
         const errMsg =
@@ -355,7 +580,14 @@ export async function runPi(
           output ||
           stderr.trim().slice(-500) ||
           `pi exited with code ${code}`;
+        const failureClass = classifyRunFailure({
+          terminationReason,
+          providerFailureClass,
+          exitCode: code,
+          hasOutput: Boolean(output),
+        });
         console.error(`pi failed: ${errMsg.substring(0, 500)}`);
+        console.error(`pi failure_class=${failureClass}`);
         resolve({
           conclusion: "failure",
           output: errMsg,
@@ -371,6 +603,9 @@ export async function runPi(
             modelLabel: usage.modelLabel,
             source: usage.source,
           },
+          failureClass,
+          ...(terminationReason ? { terminationReason } : {}),
+          ...telemetry,
         });
       }
     });
@@ -379,7 +614,9 @@ export async function runPi(
       if (settled) return;
       settled = true;
       clearTimeout(timeoutTimer);
+      clearIdleTimer();
       if (forceKillTimer) clearTimeout(forceKillTimer);
+      const telemetry = streamTelemetry();
       const elapsed = (Date.now() - startTime) / 1000;
       console.error(`pi spawn error:`, err.message);
       try {
@@ -401,6 +638,8 @@ export async function runPi(
           modelLabel: runModelLabel,
           source: "unknown",
         },
+        failureClass: "process_error",
+        ...telemetry,
       });
     });
   });

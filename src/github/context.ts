@@ -56,6 +56,59 @@ function parsePositiveIntegerInput(name: string, value: string, defaultValue: nu
   return parsed;
 }
 
+/**
+ * Parse `stall_timeout_seconds`, FAILING CLOSED on anything unreadable.
+ *
+ * Deliberately unlike `parsePositiveIntegerInput` above, which warns and falls
+ * back to its default. A watchdog is a safety mechanism: silently disabling it
+ * (or silently widening it) because someone typed `12O` would leave the review
+ * exposed to exactly the hang this input exists to bound, behind a green log
+ * line. A misconfigured watchdog is a configuration failure, and it must be
+ * reported before any model runs rather than discovered 600 seconds later.
+ *
+ * An EMPTY value is not a misconfiguration — it is the documented default, and
+ * the documented default is 0 (disabled), so a consumer that never sets this
+ * input behaves exactly as it did before the input existed.
+ *
+ * @throws {Error} when the value is present and not a non-negative integer.
+ */
+export function parseStallTimeoutSecondsInput(value: string): number {
+  const normalized = value.trim();
+  if (!normalized) return 0;
+  const parsed = Number(normalized);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(
+      `Invalid stall_timeout_seconds input: "${normalized}". ` +
+        "Expected a non-negative integer number of seconds (0 disables the stream-idle watchdog). " +
+        "Refusing to run: a watchdog that silently disables itself on a typo is not a watchdog.",
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Parse `max_degraded_lenses`, resolving anything unreadable to 0 (strict).
+ *
+ * Warn-and-clamp rather than throw, unlike `stall_timeout_seconds`: a
+ * misconfigured tolerance that resolves to 0 is exactly the pre-existing
+ * behaviour, so it is safe to continue. What must never happen is the opposite —
+ * a typo widening what the review accepts. Fail closed, always in the strict
+ * direction.
+ */
+export function parseMaxDegradedLensesInput(value: string): number {
+  const normalized = value.trim();
+  if (!normalized) return 0;
+  const parsed = Number(normalized);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    core.warning(
+      `Ignoring invalid max_degraded_lenses input: ${normalized}. Using 0 (strict) — ` +
+        "a misconfigured tolerance must never widen what the review accepts.",
+    );
+    return 0;
+  }
+  return parsed;
+}
+
 export function parseInputs(): ActionInputs {
   return {
     triggerPhrase: core.getInput("trigger_phrase") || "@pi",
@@ -66,6 +119,7 @@ export function parseInputs(): ActionInputs {
     systemPrompt: core.getInput("system_prompt") || "",
     maxTurns: parseInt(core.getInput("max_turns") || "20", 10),
     runTimeoutSeconds: parsePositiveIntegerInput("run_timeout_seconds", core.getInput("run_timeout_seconds"), 600),
+    stallTimeoutSeconds: parseStallTimeoutSecondsInput(core.getInput("stall_timeout_seconds")),
     tools: core.getInput("tools") || "",
     configPath: core.getInput("config_path") || ".elek.yml",
     baseBranch: core.getInput("base_branch") || undefined,
@@ -77,6 +131,7 @@ export function parseInputs(): ActionInputs {
     reviewStrategy: core.getInput("review_strategy") || "",
     reviewModels: core.getInput("review_models") || "",
     reviewLenses: core.getInput("review_lenses") || "",
+    maxDegradedLenses: parseMaxDegradedLensesInput(core.getInput("max_degraded_lenses")),
     reviewAgentCount: parseReviewAgentCountInput(core.getInput("review_agent_count")),
     advisorModel: core.getInput("advisor_model") || "",
     advisorThinking: core.getInput("advisor_thinking") || "",

@@ -54,12 +54,11 @@ import type { PiRunResult } from "../types.js";
 import {
   buildLensPrompt,
   buildSynthesisPrompt,
-  failedRequiredReviewLensIds,
   resolveReviewPlan,
   resolveReviewPlanSupport,
   selectReviewPlanWithinBudget,
-  shouldRetryLens,
   type DiffPromptBudgetReport,
+  type ModelSpec,
   type ReviewJob,
   type ReviewPlan,
 } from "../review/strategy.js";
@@ -72,16 +71,32 @@ import {
   type ReviewCost,
 } from "../review/cost.js";
 import {
-  buildReviewSummary,
   metricFromPiRun,
+  type ReviewAttemptMetric,
   type ReviewRunMetric,
 } from "../review/summary.js";
+import { executeLensWithRetry } from "../review/lens-execution.js";
+import {
+  evaluateCouncilPolicy,
+  type CouncilPolicyResult,
+} from "../review/council-policy.js";
+import { createSummaryFinalizer, type SummaryFinalizer } from "../review/summary-finalizer.js";
 import { parseReviewFindings } from "../review/findings.js";
 import { preparePublicReviewOutput } from "../review/public-output.js";
 import { modelLabelRedactionTerms, publicModelLabelFor } from "../review/public-label.js";
 import { inlineReviewBufferFromFindings } from "../review/inline-fallback.js";
 import { sanitize } from "../mcp/handlers.js";
 import type { PostSummary } from "./post-buffered.js";
+
+/**
+ * The live finalizer, visible to the top-level failure handler.
+ *
+ * Module scope is deliberate and is the whole point: an exception thrown ANYWHERE
+ * after the context is parsed must still be able to emit a failure summary. The
+ * previous code lost every terminal record precisely because the only emit site
+ * was the last statement of the happy path.
+ */
+let activeFinalizer: SummaryFinalizer | undefined;
 
 async function run(): Promise<void> {
   // ── Phase 0: Parse inputs & context ──────────────────────────────────
@@ -92,13 +107,35 @@ async function run(): Promise<void> {
   core.setOutput("review_summary_json", "");
 
   const actionStartedAt = new Date();
-  const parsedInputs = parseInputs();
+  // Context BEFORE inputs, deliberately. Input validation can fail closed (see
+  // parseStallTimeoutSecondsInput), and a configuration failure that happens
+  // before the context exists cannot emit a summary at all. Parsing the event
+  // first means a bad input is reported as a failure summary rather than as
+  // silence.
   const context = parseEntityContext();
 
   if (!context) {
+    // No context means no entity, and inventing one would be a false claim about
+    // what was reviewed. This is the one supported terminal path with no summary.
     core.setFailed(`Unsupported event: ${process.env.GITHUB_EVENT_NAME}`);
     return;
   }
+
+  const summaryTmpDir = process.env.RUNNER_TEMP || "/tmp";
+  const finalizer = createSummaryFinalizer({
+    tmpDir: summaryTmpDir,
+    context,
+    runId: process.env.GITHUB_RUN_ID || "?",
+    jobRunLink: `https://github.com/${context.repo.fullName}/actions/runs/${process.env.GITHUB_RUN_ID || "?"}`,
+    startedAt: actionStartedAt,
+  });
+  activeFinalizer = finalizer;
+
+  const parsedInputs = parseInputs();
+  finalizer.update({
+    mode: parsedInputs.mode,
+    requestedStrategy: parsedInputs.reviewStrategy,
+  });
 
   console.log(
     `Event: ${context.eventName}.${context.eventAction} | ` +
@@ -112,12 +149,26 @@ async function run(): Promise<void> {
     console.log("No trigger detected — exiting cleanly");
     core.setOutput("conclusion", "skipped");
     core.setOutput("summary", "No trigger detected");
+    // A zero-run summary is emitted here so the decline is DECLARED rather than
+    // inferred from an empty output. The downstream gate still validates the
+    // reason against its own closed allowlist — this record is evidence, not
+    // permission.
+    finalizer.finalize({
+      conclusion: "success",
+      terminalReason: "declined",
+      skipReason: "no_trigger_detected",
+    });
     return;
   }
 
   const githubToken = process.env.GITHUB_TOKEN;
   if (!githubToken) {
     core.setFailed("GITHUB_TOKEN not available");
+    finalizer.finalize({
+      conclusion: "failure",
+      terminalReason: "configuration_error",
+      failureMessage: "GITHUB_TOKEN not available",
+    });
     return;
   }
 
@@ -142,6 +193,11 @@ async function run(): Promise<void> {
     );
     core.setOutput("conclusion", "skipped");
     core.setOutput("summary", `Actor @${context.actor} not authorized`);
+    finalizer.finalize({
+      conclusion: "success",
+      terminalReason: "declined",
+      skipReason: "actor_not_authorized",
+    });
     return;
   }
 
@@ -377,8 +433,9 @@ async function run(): Promise<void> {
   // the packer rather than re-derived by any consumer. Keyed so a cached prompt
   // does not double-report.
   const promptBudgetByKey = new Map<string, DiffPromptBudgetReport>();
+  const lensPromptKey = (job: ReviewJob): string => `${job.lens.id}\0${job.model.label}`;
   const lensPromptFor = (job: ReviewJob): string => {
-    const key = `${job.lens.id}\0${job.model.label}`;
+    const key = lensPromptKey(job);
     const cached = lensPromptCache.get(key);
     if (cached !== undefined) return cached;
     const lensPrompt = buildLensPrompt({
@@ -472,7 +529,13 @@ async function run(): Promise<void> {
 
   const runCosts: ReviewCost[] = [];
   const runMetrics: ReviewRunMetric[] = [];
+  // Every PHYSICAL attempt, including the discarded one when a retry succeeded.
+  // `runMetrics` stays one DECISIVE entry per logical lens so quorum arithmetic
+  // downstream remains 1:1 with the council; the two views answer different
+  // questions and conflating them is how a retry became invisible.
+  const attemptMetrics: ReviewAttemptMetric[] = [];
   let retriedLensIdsForSummary: string[] = [];
+  let councilPolicy: CouncilPolicyResult | undefined;
 
   let finalInputs = piInputs;
   if (useReviewPlan) {
@@ -517,90 +580,106 @@ async function run(): Promise<void> {
     }
 
     const reviewerJobs = reviewPlan.validatorReview ? [...reviewPlan.jobs, reviewPlan.validatorReview] : reviewPlan.jobs;
+    // The reviewer roster failover draws from. The advisor's model is deliberately
+    // NOT in it: the advisor is an independent audit, and swapping a stalled
+    // reviewer onto it would collapse two nominally independent opinions into one.
+    const reviewerRoster: ModelSpec[] = reviewPlan.jobs.map((j) => j.model);
+
+    const lensInputsFor = (job: ReviewJob) => ({
+      ...piInputs,
+      provider: job.model.provider,
+      model: job.model.model,
+      thinking: job.role === "validator-review"
+        ? inputs.advisorThinking || inputs.validatorThinking || inputs.thinking
+        : inputs.thinking,
+      tools: lensTools,
+      mode: "review",
+    });
+
     const lensRuns = await Promise.all(
       reviewerJobs.map(async (job) => {
-        const lensPrompt = lensPromptFor(job);
-        const lensInputs = {
-          ...piInputs,
-          provider: job.model.provider,
-          model: job.model.model,
-          thinking: job.role === "validator-review"
-            ? inputs.advisorThinking || inputs.validatorThinking || inputs.thinking
-            : inputs.thinking,
-          tools: lensTools,
-          mode: "review",
-        };
-        // A required lens failure fails the whole review (fail closed). Provider
-        // faults are transient often enough that a single unlucky 5xx would
-        // otherwise red a PR that has nothing wrong with it, so give each
-        // required lens exactly ONE retry first. A lens that fails twice is
-        // treated as a real failure and still fails the review — this narrows
-        // the flake window, it does not soften the gate.
-        const attempts: PiRunResult[] = [];
-        let lensResult = await runPi(
-          lensPrompt,
-          lensInputs,
-          undefined,
-          false,
-          { promptName: `lens-${job.lens.id}` },
-        );
-        attempts.push(lensResult);
-        let retried = false;
-        if (shouldRetryLens({
-          role: job.role,
-          conclusion: lensResult.conclusion,
-          attemptsSoFar: attempts.length,
-        })) {
-          retried = true;
-          console.warn(`[${job.lens.id}] attempt 1 failed — retrying once before failing the review`);
-          const retryResult = await runPi(
-            lensPrompt,
-            lensInputs,
-            undefined,
-            false,
-            { promptName: `lens-${job.lens.id}-retry` },
-          );
-          attempts.push(retryResult);
-          console.log(
-            retryResult.conclusion === "success"
-              ? `[${job.lens.id}] retry succeeded`
-              : `[${job.lens.id}] retry also failed — failing the review closed`,
-          );
-          lensResult = retryResult;
-        }
-        const lensOutput = sanitize(lensResult.output);
+        // A required lens failure fails the whole review unless the council still
+        // reaches quorum. Exactly ONE elek-managed outer retry is permitted, and
+        // WHAT that retry changes now depends on the terminal failure class:
+        //
+        //   stall / timeout / max_turns / invalid_output -> next distinct model
+        //   provider_transient                           -> same model
+        //   everything else                              -> no retry, fail closed
+        //
+        // Re-sending a byte-identical prompt to a model that just hung is not a
+        // retry, it is a second copy of the same failure — measured twice on
+        // eha_care #3291, 600s each time.
+        const execution = await executeLensWithRetry({
+          job,
+          roster: reviewerRoster,
+          deps: {
+            // The prompt and the pi inputs are built FROM the job handed back, so
+            // a substituted model gets its own prompt label and its own diff
+            // budget rather than inheriting the failed model's.
+            runAttempt: (activeJob, promptName) =>
+              runPi(lensPromptFor(activeJob), lensInputsFor(activeJob), undefined, false, { promptName }),
+            promptBudgetFor: (activeJob) => promptBudgetByKey.get(lensPromptKey(activeJob)),
+            log: (message) => console.log(message),
+            warn: (message) => console.warn(message),
+          },
+        });
+        attemptMetrics.push(...execution.attemptMetrics);
+        const lensOutput = sanitize(execution.lensResult.output);
         console.log(
-          `[${job.lens.id}] ${lensResult.conclusion} · ${lensOutput.substring(0, 180)}`,
+          `[${job.lens.id}] ${execution.lensResult.conclusion} · ${lensOutput.substring(0, 180)}`,
         );
-        return { job, lensResult, lensOutput, attempts, retried };
+        return { ...execution, lensOutput };
       }),
     );
 
     retriedLensIdsForSummary = lensRuns.filter(({ retried }) => retried).map(({ job }) => job.lens.id);
 
-    for (const { job, lensResult, attempts } of lensRuns) {
+    for (const { job, activeJob, lensResult, attempts, failoverUsed } of lensRuns) {
       // Charge for EVERY attempt — a retry spends real money, and a cost report
-      // that hides it would understate the run.
+      // that hides it would understate the run. One retry can therefore exceed
+      // the pre-execution soft cost estimate; the bound is the attempt count, not
+      // the estimate.
       for (const attempt of attempts) {
         runCosts.push(costFromPiResult(attempt));
       }
-      // Report ONE metric per lens (the decisive attempt), so the per-lens shape
-      // downstream consumers rely on stays 1:1 with the council. The discarded
-      // attempt is still visible via retriedLensIds and the cost runs.
+      // Report ONE metric per lens (the DECISIVE attempt), so the per-lens shape
+      // downstream consumers rely on stays 1:1 with the council. When failover
+      // succeeded, the logical lens succeeded under the REPLACEMENT model, and
+      // both labels are recorded so the census can say which is which.
       runMetrics.push(metricFromPiRun(lensResult, job.role || "reviewer", {
         lensId: job.lens.id,
         lensTitle: job.lens.title,
+        assignedModelLabel: job.model.label,
+        actualModelLabel: activeJob.model.label,
+        failoverUsed,
+        attemptCount: attempts.length,
       }));
     }
 
-    const failedRequiredLenses = failedRequiredReviewLensIds(
-      lensRuns.map(({ job, lensResult }) => ({
-        job,
+    // The tolerance decision, evaluated EXPLICITLY rather than as
+    // `failedRequiredReviewLensIds().length > 0`. That boolean scored a council —
+    // a redundancy mechanism — as a serial reliability chain, so one hung request
+    // blocked the pull request. `failedRequiredReviewLensIds` remains as the
+    // census it always was.
+    councilPolicy = evaluateCouncilPolicy({
+      runs: lensRuns.map(({ job, activeJob, lensResult }) => ({
+        role: job.role || "reviewer",
+        lensId: job.lens.id,
+        modelLabel: activeJob.model.label,
         conclusion: lensResult.conclusion,
       })),
+      configuredMaxDegradedLenses: inputs.maxDegradedLenses,
+    });
+    for (const warning of councilPolicy.warnings) core.warning(`[council] ${warning}`);
+    finalizer.update({ councilPolicy });
+    console.log(
+      `[council] status=${councilPolicy.status} reviewers=${councilPolicy.reviewerLensesTotal} ` +
+        `failed=${councilPolicy.reviewerLensesFailed} tolerance=${councilPolicy.effectiveMaxDegradedLenses} ` +
+        `(configured ${councilPolicy.configuredMaxDegradedLenses})`,
     );
-    if (failedRequiredLenses.length > 0) {
-      const failureMessage = `Required review lanes failed: ${failedRequiredLenses.join(", ")}`;
+
+    if (councilPolicy.status === "breached") {
+      const failureMessage = `Council policy breached: ${councilPolicy.message}`;
       if (commentId) {
         try {
           await updateTrackingComment(
@@ -619,7 +698,40 @@ async function run(): Promise<void> {
           console.warn("Could not update failed strategy status:", err);
         }
       }
-      throw new Error(failureMessage);
+      // EMIT BEFORE FAILING. This is the whole D3 defect: the previous code threw
+      // here, the throw escaped run(), and the action exited having set no
+      // review_summary_json at all — so the downstream gate saw zero model runs
+      // and reported "no evidence a review prompt was ever built" for a review
+      // that had produced healthy lens reports. A partial record is what makes
+      // the failure diagnosable AND what makes the downstream quorum meaningful.
+      core.error(failureMessage);
+      finalizer.update({
+        costTotal: aggregateCosts(runCosts),
+        runs: runMetrics,
+        attempts: attemptMetrics,
+        promptBudgets: [...promptBudgetByKey.values()],
+        retriedLensIds: retriedLensIdsForSummary,
+        executedStrategy: reviewPlan.strategy,
+        finalModelLabel: reviewPlan.validator.label,
+      });
+      finalizer.finalize({
+        conclusion: "failure",
+        terminalReason: "council_policy_breached",
+        failureMessage,
+      });
+      const costTotalOnBreach = aggregateCosts(runCosts);
+      core.setOutput("conclusion", "failure");
+      core.setOutput("cost_usd", costTotalOnBreach.costUsd.toFixed(6));
+      core.setOutput("input_tokens", String(costTotalOnBreach.inputTokens));
+      core.setOutput("output_tokens", String(costTotalOnBreach.outputTokens));
+      core.setFailed(failureMessage);
+      return;
+    }
+
+    if (councilPolicy.status === "degraded" && councilPolicy.message) {
+      // Never silent. A green with no annotation for a thinner-than-advertised
+      // review is the same defect class this gate exists to prevent.
+      core.warning(`[council] ${councilPolicy.message}`);
     }
 
     const reports = lensRuns.map(({ job, lensResult, lensOutput }) => ({
@@ -704,7 +816,38 @@ async function run(): Promise<void> {
     );
   }
   const parsedFindings = parseReviewFindings(publicOutput);
-  runMetrics.push(metricFromPiRun(result, "validator"));
+  runMetrics.push(metricFromPiRun(result, "validator", {
+    assignedModelLabel: activeModelLabel,
+    actualModelLabel: activeModelLabel,
+    failoverUsed: false,
+    attemptCount: 1,
+  }));
+  // The final synthesis is one physical attempt too. Recording it keeps the
+  // attempt history a COMPLETE account of what ran, rather than one that silently
+  // stops at the reviewer wave.
+  attemptMetrics.push({
+    lensId: "validator",
+    lensTitle: "Orchestrator synthesis",
+    role: "validator",
+    attempt: 1,
+    assignedModel: activeModelLabel,
+    actualModel: result.usage.modelLabel || activeModelLabel,
+    failover: false,
+    conclusion: result.conclusion,
+    ...(result.failureClass ? { failureClass: result.failureClass } : {}),
+    ...(result.terminationReason ? { terminationReason: result.terminationReason } : {}),
+    durationSeconds: Math.round(Math.max(0, result.durationSeconds) * 10) / 10,
+    turnsUsed: result.turnsUsed,
+    providerRetries: result.providerRetries,
+    inputTokens: result.usage.inputTokens,
+    outputTokens: result.usage.outputTokens,
+    costUsd: Math.round(Math.max(0, result.costUsd) * 1_000_000) / 1_000_000,
+    timeToFirstEventSeconds: result.timeToFirstEventSeconds ?? null,
+    maxIdleSecondsObserved: result.maxIdleSecondsObserved ?? 0,
+    streamEventCount: result.streamEventCount ?? 0,
+    malformedLineCount: result.malformedLineCount ?? 0,
+    ...(result.lastEventType ? { lastEventType: result.lastEventType } : {}),
+  });
   const costTotal = aggregateCosts(runCosts);
   const costLine = inputs.showCost ? formatCostLine(costTotal) : "";
   if (result.output) {
@@ -904,18 +1047,12 @@ async function run(): Promise<void> {
   core.setOutput("input_tokens", String(costTotal.inputTokens));
   core.setOutput("output_tokens", String(costTotal.outputTokens));
 
-  const reviewSummary = buildReviewSummary({
-    context,
-    runId,
-    jobRunLink,
-    conclusion: result.conclusion,
+  finalizer.update({
     mode: resolvedMode.mode,
     requestedStrategy: inputs.reviewStrategy,
     executedStrategy: useReviewPlan ? reviewPlan.strategy : "solo",
     primaryModelLabel: modelLabel,
     finalModelLabel: activeModelLabel,
-    startedAt: actionStartedAt,
-    finishedAt: new Date(),
     commentId,
     branchName: workBranch,
     inlineComments: inlineSummary,
@@ -924,27 +1061,42 @@ async function run(): Promise<void> {
     findings: parsedFindings,
     promptBudgets: [...promptBudgetByKey.values()],
     retriedLensIds: retriedLensIdsForSummary,
+    attempts: attemptMetrics,
+    councilPolicy,
   });
-  const reviewSummaryJson = JSON.stringify(reviewSummary);
-  const reviewSummaryFileJson = JSON.stringify(reviewSummary, null, 2);
-  const reviewSummaryPath = join(tmpDir, "elek-review-summary.json");
-  try {
-    writeFileSync(reviewSummaryPath, `${reviewSummaryFileJson}\n`, "utf-8");
-    core.setOutput("review_summary_path", reviewSummaryPath);
-    console.log(`Wrote review summary: ${reviewSummaryPath}`);
-  } catch (err) {
-    console.warn("Could not write review summary:", (err as Error).message);
-    core.setOutput("review_summary_path", "");
-  }
-  core.setOutput("review_summary_json", reviewSummaryJson);
 
+  // A successful final synthesis is REQUIRED even when the council ran degraded.
+  // A degraded council means one reviewer opinion is missing; a failed validator
+  // means nothing reconciled or posted the findings at all, which is not a
+  // thinner review but an absent one.
   if (result.conclusion === "failure") {
+    finalizer.finalize({
+      conclusion: "failure",
+      terminalReason: "validator_failed",
+      failureMessage: "pi execution failed",
+    });
     core.setFailed("pi execution failed");
+    return;
   }
+
+  finalizer.finalize({ conclusion: "success", terminalReason: "completed" });
 }
 
 run().catch((err) => {
   console.error("Fatal error:", err);
+  // Best effort, from whatever state accumulated. An unexpected exception used to
+  // exit with no record at all, which is what turned a single hung lens into
+  // "no evidence a review prompt was ever built" downstream. The finalizer is
+  // idempotent, so this is a no-op when the normal path already emitted.
+  try {
+    activeFinalizer?.finalize({
+      conclusion: "failure",
+      terminalReason: "unexpected_error",
+      failureMessage: err instanceof Error ? err.message : String(err),
+    });
+  } catch (finalizeErr) {
+    console.error("Could not emit a failure summary:", finalizeErr);
+  }
   core.setFailed(`Fatal: ${err.message}`);
   process.exit(1);
 });

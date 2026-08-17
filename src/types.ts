@@ -45,6 +45,19 @@ export interface ActionInputs {
   reviewModels: string;
   /** Optional comma-separated built-in lens IDs for multi-agent reviews. */
   reviewLenses?: string;
+  /**
+   * How many reviewer lenses may fail while the review still completes.
+   *
+   * Default 0 (strict), so an existing consumer is byte-identical to before. A
+   * council is a redundancy mechanism, and scoring it by unanimity-of-availability
+   * throws that redundancy away — one hung request blocks the pull request. This
+   * knob is the redundancy, and it fails CLOSED: anything unreadable resolves to
+   * 0, never to a wider value.
+   *
+   * Validator roles never consume it. Their failure means nothing audited or
+   * reconciled the findings, which is not a degraded review but an absent one.
+   */
+  maxDegradedLenses: number;
   /** Optional number of parallel reviewer agents for thermos strategy. */
   reviewAgentCount?: number;
   /** Optional model spec for the independent advisor audit. */

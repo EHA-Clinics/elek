@@ -86,6 +86,29 @@ export function parseStallTimeoutSecondsInput(value: string): number {
   return parsed;
 }
 
+/**
+ * Parse `max_degraded_lenses`, resolving anything unreadable to 0 (strict).
+ *
+ * Warn-and-clamp rather than throw, unlike `stall_timeout_seconds`: a
+ * misconfigured tolerance that resolves to 0 is exactly the pre-existing
+ * behaviour, so it is safe to continue. What must never happen is the opposite —
+ * a typo widening what the review accepts. Fail closed, always in the strict
+ * direction.
+ */
+export function parseMaxDegradedLensesInput(value: string): number {
+  const normalized = value.trim();
+  if (!normalized) return 0;
+  const parsed = Number(normalized);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    core.warning(
+      `Ignoring invalid max_degraded_lenses input: ${normalized}. Using 0 (strict) — ` +
+        "a misconfigured tolerance must never widen what the review accepts.",
+    );
+    return 0;
+  }
+  return parsed;
+}
+
 export function parseInputs(): ActionInputs {
   return {
     triggerPhrase: core.getInput("trigger_phrase") || "@pi",
@@ -108,6 +131,7 @@ export function parseInputs(): ActionInputs {
     reviewStrategy: core.getInput("review_strategy") || "",
     reviewModels: core.getInput("review_models") || "",
     reviewLenses: core.getInput("review_lenses") || "",
+    maxDegradedLenses: parseMaxDegradedLensesInput(core.getInput("max_degraded_lenses")),
     reviewAgentCount: parseReviewAgentCountInput(core.getInput("review_agent_count")),
     advisorModel: core.getInput("advisor_model") || "",
     advisorThinking: core.getInput("advisor_thinking") || "",

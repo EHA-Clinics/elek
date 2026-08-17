@@ -12,6 +12,7 @@ import { tmpdir } from "os";
 import {
   parseEntityContext,
   parseInputs,
+  parseMaxDegradedLensesInput,
   parseStallTimeoutSecondsInput,
 } from "../src/github/context";
 
@@ -35,6 +36,7 @@ const ENV_KEYS = [
   "INPUT_MAX_COST_USD",
   "INPUT_RUN_TIMEOUT_SECONDS",
   "INPUT_STALL_TIMEOUT_SECONDS",
+  "INPUT_MAX_DEGRADED_LENSES",
 ];
 const saved: Record<string, string | undefined> = {};
 
@@ -314,5 +316,37 @@ describe("parseStallTimeoutSecondsInput", () => {
     expect(parseInputs().stallTimeoutSeconds).toBe(0);
     process.env.INPUT_STALL_TIMEOUT_SECONDS = "120";
     expect(parseInputs().stallTimeoutSeconds).toBe(120);
+  });
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * max_degraded_lenses — warn-and-clamp, ALWAYS in the strict direction.
+ * ──────────────────────────────────────────────────────────────────────────── */
+describe("parseMaxDegradedLensesInput", () => {
+  it("defaults to strict when unset", () => {
+    expect(parseMaxDegradedLensesInput("")).toBe(0);
+    expect(parseMaxDegradedLensesInput("  ")).toBe(0);
+  });
+
+  it("accepts a non-negative integer tolerance", () => {
+    expect(parseMaxDegradedLensesInput("0")).toBe(0);
+    expect(parseMaxDegradedLensesInput("1")).toBe(1);
+    expect(parseMaxDegradedLensesInput(" 2 ")).toBe(2);
+  });
+
+  it("resolves anything unreadable to 0 rather than to a wider value", () => {
+    // The direction is the whole point: a typo may make the gate STRICTER, never
+    // more permissive.
+    expect(parseMaxDegradedLensesInput("-1")).toBe(0);
+    expect(parseMaxDegradedLensesInput("1.5")).toBe(0);
+    expect(parseMaxDegradedLensesInput("one")).toBe(0);
+    expect(parseMaxDegradedLensesInput("true")).toBe(0);
+  });
+
+  it("is wired into parseInputs", () => {
+    delete process.env.INPUT_MAX_DEGRADED_LENSES;
+    expect(parseInputs().maxDegradedLenses).toBe(0);
+    process.env.INPUT_MAX_DEGRADED_LENSES = "1";
+    expect(parseInputs().maxDegradedLenses).toBe(1);
   });
 });

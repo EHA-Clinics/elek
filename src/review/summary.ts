@@ -1,4 +1,5 @@
 import type { GitHubEntityContext, PiFailureClass, PiRunResult } from "../types.js";
+import type { CouncilPolicyResult } from "./council-policy.js";
 import type { DiffPromptBudgetReport } from "./strategy.js";
 import type { ReviewCost, ReviewCostTotal } from "./cost.js";
 import type { PostSummary } from "../entrypoints/post-buffered.js";
@@ -102,29 +103,22 @@ export interface ReviewSummaryInput {
   /** Every physical attempt, in completion order. Additive; `version` stays 1. */
   attempts?: ReviewAttemptMetric[];
   /**
+   * WHICH supported terminal path emitted this summary. A consumer that has to
+   * distinguish "the review declined" from "the review broke before it started"
+   * currently has to infer it from an empty output, and inferring a decline from
+   * an absence is the fail-open this whole record exists to remove.
+   */
+  terminalReason?: string;
+  /** Set only on an explicit decline. Zero runs plus any other reason is a failure. */
+  skipReason?: string;
+  /** Human-readable failure detail for a failure summary. */
+  failureMessage?: string;
+  /**
    * The degraded-reviewer-lens tolerance this run actually applied, so a
    * downstream gate can detect producer/gate policy drift instead of assuming
    * two independently-defaulted values happen to agree.
    */
-  councilPolicy?: CouncilPolicyReport;
-}
-
-/**
- * The council policy elek applied, reported so it can be COMPARED downstream.
- *
- * `configured` is what the input asked for; `effective` is what was actually
- * enforced after fail-closed normalisation. They differ exactly when someone
- * misconfigured the knob, which is the case worth seeing.
- */
-export interface CouncilPolicyReport {
-  configuredMaxDegradedLenses: number | null;
-  effectiveMaxDegradedLenses: number;
-  status: "healthy" | "degraded" | "breached";
-  reviewerLensesTotal: number;
-  reviewerLensesFailed: number;
-  failedReviewerLensIds: string[];
-  failedValidatorRoleIds: string[];
-  unclassifiedRunLabels: string[];
+  councilPolicy?: CouncilPolicyResult;
 }
 
 export function metricFromPiRun(
@@ -196,6 +190,9 @@ export function buildReviewSummary(input: ReviewSummaryInput) {
       finalModel: input.finalModelLabel,
       branchName: input.branchName || "",
       commentId: input.commentId ? String(input.commentId) : "",
+      terminalReason: input.terminalReason ?? "completed",
+      skipReason: input.skipReason ?? "",
+      failureMessage: input.failureMessage ?? "",
     },
     inlineComments,
     findings: (input.findings ?? []).map((finding, index) => ({

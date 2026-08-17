@@ -170,6 +170,29 @@ inputs:
       example: security-correctness,contract-drift,mobile-runtime.
     required: false
     default: ""
+  max_degraded_lenses:
+    description: >
+      How many reviewer lenses may fail while the review still completes.
+
+      Default "0" — strict, and byte-identical to every previous release. A
+      council is a redundancy mechanism; scoring it by unanimity-of-availability
+      throws that redundancy away, so one hung request blocks the pull request.
+      Raise it to make a single reviewer dropout non-blocking.
+
+      Never consumed by validator roles. A failed `validator-review` or final
+      validator means nothing independently audited or reconciled the findings,
+      which is an ABSENT review rather than a degraded one, and still fails.
+      Neither is a wiped reviewer panel, an unclassifiable failed run, or a value
+      that is not below the reviewer lens count.
+
+      Fails CLOSED: an invalid, negative or fractional value resolves to 0 with a
+      warning. A misconfigured tolerance must never widen what the review accepts.
+
+      A degraded run exits successfully but is never silent — it emits a warning
+      naming every failed lens, its assigned model, its actual model and its
+      terminal failure class.
+    required: false
+    default: "0"
   review_agent_count:
     description: >
       Optional number of parallel reviewer agents for review_strategy=thermos.
@@ -320,6 +343,7 @@ runs:
         INPUT_REVIEW_STRATEGY: ${{ inputs.review_strategy }}
         INPUT_REVIEW_MODELS: ${{ inputs.review_models }}
         INPUT_REVIEW_LENSES: ${{ inputs.review_lenses }}
+        INPUT_MAX_DEGRADED_LENSES: ${{ inputs.max_degraded_lenses }}
         INPUT_REVIEW_AGENT_COUNT: ${{ inputs.review_agent_count }}
         INPUT_ADVISOR_MODEL: ${{ inputs.advisor_model }}
         INPUT_ADVISOR_THINKING: ${{ inputs.advisor_thinking }}

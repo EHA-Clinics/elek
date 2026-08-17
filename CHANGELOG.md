@@ -43,11 +43,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `modelRuns[]` still carries one DECISIVE entry per logical lens, so quorum
   arithmetic stays 1:1 with the council.
 
+- `max_degraded_lenses`: how many reviewer lenses may fail while the review still
+  completes. Default `0` (strict, byte-identical to previous releases). Validator
+  roles never consume it, a wiped reviewer panel and an unclassifiable failed run
+  are never tolerated, and an invalid value resolves to `0` with a warning — a
+  misconfigured tolerance must never widen what the review accepts. A degraded run
+  exits successfully but emits a warning naming every failed lens, its assigned
+  model, its actual model and its terminal failure class.
+- `review.terminalReason`, `review.skipReason` and `councilPolicy` in the review
+  summary, so a consumer can tell "the review declined" from "the review broke
+  before it started" instead of inferring it from an empty output.
+
 ### Changed
 
 - Retrying a failed lens no longer re-sends a byte-identical prompt to the model
   that just failed. That was strictly worse than not retrying for a hung request:
   it spent a second full wall-clock budget reproducing the same hang.
+- The council tolerance decision is an explicit policy evaluation rather than
+  `failedRequiredReviewLensIds().length > 0`.
+
+### Fixed
+
+- **A failed required lens no longer exits without a review summary.** elek used
+  to `throw` on a failed required lane; the throw escaped `run()` and the action
+  exited having set no `review_summary_json` at all. A downstream consumer then
+  saw zero model runs and could only report that no review prompt was ever built —
+  for a run that had produced healthy lens reports. Every supported terminal path
+  now goes through one idempotent finalizer that emits at most once: completion,
+  explicit decline, configuration failure, council-policy breach, validator
+  failure, and any unexpected exception after the event context is parsed. Only
+  an unsupported event, which has no entity to describe, still emits nothing.
 
 ### Fixed
 

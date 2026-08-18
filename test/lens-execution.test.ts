@@ -154,9 +154,39 @@ describe("executeLensWithRetry", () => {
     const out = await executeLensWithRetry({ job: job(PRO), roster: ROSTER, deps: { runAttempt: rec.runAttempt } });
 
     // A third attempt here would blow the job-cap arithmetic that assumes
-    // setup + 2 x run_timeout, so it must never happen.
+    // setup + 2 x run_timeout for the classes that DO retry, so it must never
+    // happen. (`timeout` no longer retries at all — see FAILURE_RETRY_POLICY —
+    // which is what brings the serial worst case back under the 1800s job cap.)
     expect(rec.seen).toHaveLength(2);
     expect(out.attempts).toHaveLength(2);
+  });
+
+  it("spends exactly ONE attempt on a timeout — the class that used to cost two", async () => {
+    // The execution-level coverage this file previously lacked entirely: every case
+    // here used stall, provider_transient or an unclassified failure, so the timeout
+    // path had no end-to-end test at all and shipped its wrong policy row unchallenged.
+    const rec = recorder([fail(PRO.label, "timeout")]);
+    const out = await executeLensWithRetry({ job: job(PRO), roster: ROSTER, deps: { runAttempt: rec.runAttempt } });
+
+    expect(rec.seen).toHaveLength(1);
+    expect(out.retried).toBe(false);
+    expect(out.failoverUsed).toBe(false);
+    expect(out.attempts).toHaveLength(1);
+    expect(out.attemptMetrics).toHaveLength(1);
+    expect(out.lensResult.failureClass).toBe("timeout");
+    // The lens still FAILS — this narrows the wall clock, it does not soften the gate.
+    expect(out.lensResult.conclusion).toBe("failure");
+  });
+
+  it("still spends TWO attempts on a stall, so failover was narrowed and not removed", async () => {
+    // Paired against the case above. A lone "timeout does not retry" assertion would
+    // also pass if failover had been switched off wholesale.
+    const rec = recorder([fail(PRO.label, "stall"), piResult({ modelLabel: MIMO.label })]);
+    const out = await executeLensWithRetry({ job: job(PRO), roster: ROSTER, deps: { runAttempt: rec.runAttempt } });
+
+    expect(rec.seen.map((s) => s.model)).toEqual([PRO.label, MIMO.label]);
+    expect(out.attempts).toHaveLength(2);
+    expect(out.failoverUsed).toBe(true);
   });
 
   it("does not retry an unclassified failure", async () => {
@@ -216,7 +246,9 @@ describe("executeLensWithRetry", () => {
 /* ────────────────────────────────────────────────────────────────────────────
  * Structural: there is EXACTLY ONE elek-managed outer retry layer.
  *
- * The job-cap arithmetic downstream is `setup + 2 x run_timeout`. A second
+ * The job-cap arithmetic downstream is `setup + 2 x run_timeout` for the classes
+ * that retry at all — `timeout` does not, which is what keeps the serial worst
+ * case under the job cap. A second
  * retry layer stacked anywhere — a `for` loop around a lens, a retry inside
  * runPi, a wrapper around the validator — makes that arithmetic wrong by a whole
  * wall-clock budget and converts an honest red into a cancelled job with no

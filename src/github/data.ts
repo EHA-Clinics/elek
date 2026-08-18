@@ -187,7 +187,25 @@ export function buildPrompt(
       30_000;
     parts.push("<changed_files>");
     parts.push("```diff");
-    parts.push(formatChangedFilesForPrompt(data.diff, diffPromptBudgetChars(modelLabel, reservedChars)));
+    // The packing OPTIONS are load-bearing here, not decoration. Without them the
+    // solo prompt packed and transmitted every excluded file while the
+    // <elek_config> block above told the model, verbatim, that files matching
+    // exclude_paths "were removed from the changed-files diff entirely and were
+    // never sent to you" (see formatConfigPromptBlock in ../config.ts). That is a
+    // prompt asserting work that did not happen — the same defect class the
+    // coverage gate exists to catch — and it also reclaimed none of the budget
+    // exclude_paths is configured to reclaim.
+    //
+    // Solo is not an edge case: it is the default strategy, and the FORCED
+    // fallback for non-PR runs and for mode != review (resolveReviewPlanSupport).
+    // The council and synthesis prompts already pass these through
+    // (review/strategy.ts changedFilesBlock).
+    parts.push(
+      formatChangedFilesForPrompt(data.diff, diffPromptBudgetChars(modelLabel, reservedChars), {
+        excludePaths: options.repoConfig?.excludePaths,
+        productionExtensions: options.repoConfig?.prioritySourceExtensions,
+      }),
+    );
     parts.push("```");
     parts.push("</changed_files>");
     parts.push("");

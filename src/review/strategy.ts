@@ -59,6 +59,10 @@ export function failedRequiredReviewLensIds(
  * (`auto_retry_start`) are counted as telemetry and never create another outer
  * attempt. The job-cap arithmetic downstream depends on that: one initial
  * attempt plus at most one retry, never a hidden third.
+ *
+ * Note the WORST CASE is narrower than this constant implies: `timeout` — the one
+ * class that reliably consumed a whole extra budget — no longer retries at all
+ * (see FAILURE_RETRY_POLICY), so a timing-out lens costs one attempt, not two.
  */
 export const MAX_LENS_ATTEMPTS = 2;
 
@@ -76,6 +80,29 @@ export const MAX_LENS_ATTEMPTS = 2;
  * the fail-closed default for anything elek could not classify from structured
  * state, and it must stay that way: retrying on a class we could not establish
  * is guessing with the job's wall clock.
+ *
+ * ⚠️ `timeout` DOES NOT RETRY EITHER, and that row was FALSIFIED BY MEASUREMENT
+ * rather than reasoned. It shipped as `next-distinct-model` on the theory that a
+ * timeout might be model-specific. eha_care PR #3680, run 32105023640, settled it:
+ * four timeout retries were issued on four DIFFERENT models, three timed out
+ * again and the fourth returned `invalid_output`. Every failing attempt was
+ * streaming continuously — 1,896 to 2,091 events, 3 to 6 turns, 5 to 12 tool
+ * calls, max idle gap 5.2 to 9.2s — so none of it was a stall.
+ *
+ * A `timeout` means the wall-clock budget expired while real work was arriving.
+ * That is a property of the PROMPT, not of the model, so moving models cannot fix
+ * it and the retry only spends a second full budget confirming the first result.
+ * On that run it burned roughly half of a 20m42s job on attempts incapable of
+ * succeeding, and the wall clock is the scarce resource: the serial worst case
+ * `setup + attempt + retry + validator` was 1837s against a 1800s job cap, and a
+ * cancelled job loses the coverage record entirely.
+ *
+ * Not retrying costs nothing where a tolerance exists. With
+ * `max_degraded_lenses >= 1` a single timing-out lens was already going to be
+ * tolerated as a degraded council; it now reaches that verdict a full run budget
+ * sooner. Where no tolerance exists, both paths fail — one of them just fails
+ * faster. The remedy for `timeout` is more wall clock or a smaller prompt, never
+ * another model.
  */
 export type LensRetryTarget = "same-model" | "next-distinct-model";
 
@@ -83,7 +110,7 @@ export const FAILURE_RETRY_POLICY: Readonly<
   Record<PiFailureClass, { retry: boolean; target: LensRetryTarget }>
 > = Object.freeze({
   stall: { retry: true, target: "next-distinct-model" },
-  timeout: { retry: true, target: "next-distinct-model" },
+  timeout: { retry: false, target: "same-model" },
   max_turns: { retry: true, target: "next-distinct-model" },
   invalid_output: { retry: true, target: "next-distinct-model" },
   provider_transient: { retry: true, target: "same-model" },

@@ -32,12 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Per-run stream telemetry (`timeToFirstEventSeconds`, `maxIdleSecondsObserved`,
   `streamEventCount`, `malformedLineCount`, `lastEventType`) so a stall threshold
   can be calibrated from successful runs instead of guessed.
-- Typed, bounded lens retry with distinct-model failover. `stall`, `timeout`,
-  `max_turns` and `invalid_output` retry ONCE on the next distinct reviewer model;
-  `provider_transient` retries once on the same model; `provider_permanent`,
-  `process_error` and `unknown` do not retry at all. A model substitution rebuilds
-  the whole `ReviewJob`, so the replacement prompt names the replacement model and
-  receives that model's diff budget.
+- Typed, bounded lens retry with distinct-model failover. `stall`, `max_turns` and
+  `invalid_output` retry ONCE on the next distinct reviewer model;
+  `provider_transient` retries once on the same model; `timeout`,
+  `provider_permanent`, `process_error` and `unknown` do not retry at all. A model
+  substitution rebuilds the whole `ReviewJob`, so the replacement prompt names the
+  replacement model and receives that model's diff budget.
 - `attempts[]` in the review summary: every PHYSICAL attempt with its assigned
   model, actual model, failover flag, failure class, cost and prompt budget.
   `modelRuns[]` still carries one DECISIVE entry per logical lens, so quorum
@@ -64,6 +64,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`timeout` no longer consumes the outer retry.** It shipped as
+  `next-distinct-model` on the theory that a wall-clock overrun might be
+  model-specific. Measurement falsified that: four timeout retries were issued on
+  four different models, three timed out again and the fourth returned
+  `invalid_output`, while every failing attempt was streaming continuously
+  (1,896-2,091 events, max idle 5.2-9.2s) — so none of it was a stall. A timeout is
+  a property of the PROMPT, not the model, so moving models only spends a second
+  full budget confirming the first result. It also mattered for the wall clock: the
+  serial worst case `setup + attempt + retry + validator` was 1837s against a
+  1800s job cap, and a cancelled job loses the coverage record entirely. Where a
+  degraded-lens tolerance exists the verdict is unchanged and simply arrives a run
+  budget sooner.
+- **`exclude_paths` is now honoured on the solo prompt path.** `buildPrompt` packed
+  and transmitted excluded files while the `<elek_config>` block it emits told the
+  model, verbatim, that they "were never sent to you" — a prompt asserting work
+  that did not happen, and no budget reclaimed either. Solo is the default strategy
+  and the forced fallback for non-PR runs and `mode != review`. The council and
+  synthesis prompts were already correct.
 - **A failed required lens no longer exits without a review summary.** elek used
   to `throw` on a failed required lane; the throw escaped `run()` and the action
   exited having set no `review_summary_json` at all. A downstream consumer then

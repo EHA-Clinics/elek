@@ -602,9 +602,13 @@ async function run(): Promise<void> {
         // reaches quorum. Exactly ONE elek-managed outer retry is permitted, and
         // WHAT that retry changes now depends on the terminal failure class:
         //
-        //   stall / timeout / max_turns / invalid_output -> next distinct model
-        //   provider_transient                           -> same model
-        //   everything else                              -> no retry, fail closed
+        //   stall / max_turns / invalid_output -> next distinct model
+        //   provider_transient                 -> same model
+        //   timeout and everything else        -> no retry, fail closed
+        //
+        // `timeout` was moved to no-retry after measurement: eha_care #3680 run
+        // 32105023640 issued four timeout retries on four DIFFERENT models and three
+        // timed out again, because a wall-clock overrun is a property of the PROMPT.
         //
         // Re-sending a byte-identical prompt to a model that just hung is not a
         // retry, it is a second copy of the same failure — measured twice on

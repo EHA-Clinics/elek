@@ -709,8 +709,8 @@ describe("selectFailoverModel", () => {
 describe("resolveLensRetry", () => {
   const base = { role: "reviewer" as const, conclusion: "failure" as const, attemptsSoFar: 1, assignedModel: PRO, roster: ROSTER };
 
-  it("moves stall, timeout, max_turns and invalid_output to the next distinct model", () => {
-    for (const failureClass of ["stall", "timeout", "max_turns", "invalid_output"] as const) {
+  it("moves stall, max_turns and invalid_output to the next distinct model", () => {
+    for (const failureClass of ["stall", "max_turns", "invalid_output"] as const) {
       const decision = resolveLensRetry({ ...base, failureClass });
       expect(decision.retry).toBe(true);
       expect(decision.failover).toBe(true);
@@ -723,6 +723,24 @@ describe("resolveLensRetry", () => {
     expect(decision.retry).toBe(true);
     expect(decision.failover).toBe(false);
     expect(decision.model!.label).toBe(PRO.label);
+  });
+
+  it("never retries a timeout — a wall-clock overrun is a property of the PROMPT", () => {
+    // FALSIFIED BY MEASUREMENT, not reasoned: eha_care #3680 run 32105023640 issued
+    // four timeout retries on four DIFFERENT models; three timed out again and the
+    // fourth returned invalid_output. Every failing attempt was streaming
+    // continuously, so none of it was a stall. Moving models cannot fix a prompt
+    // that does not fit the budget — it just spends a second budget proving it.
+    const decision = resolveLensRetry({ ...base, failureClass: "timeout" });
+    expect(decision.retry).toBe(false);
+    expect(decision.reason).toContain('failure class "timeout" is not retried');
+
+    // PAIRED DIRECTION: stall, which IS model-specific, still moves models. If this
+    // ever goes false too, the failover mechanism has been switched off wholesale
+    // rather than narrowed.
+    const stall = resolveLensRetry({ ...base, failureClass: "stall" });
+    expect(stall.retry).toBe(true);
+    expect(stall.failover).toBe(true);
   });
 
   it("never retries permanent, process or unclassified failures", () => {
@@ -747,6 +765,9 @@ describe("resolveLensRetry", () => {
 
   it("permits exactly ONE outer retry, never a hidden third attempt", () => {
     expect(MAX_LENS_ATTEMPTS).toBe(2);
+    // ...and for `timeout` the effective bound is ONE attempt, not two, which is
+    // what brings the serial worst case back under the job cap.
+    expect(FAILURE_RETRY_POLICY.timeout.retry).toBe(false);
     expect(resolveLensRetry({ ...base, failureClass: "stall", attemptsSoFar: 1 }).retry).toBe(true);
     expect(resolveLensRetry({ ...base, failureClass: "stall", attemptsSoFar: 2 }).retry).toBe(false);
     expect(resolveLensRetry({ ...base, failureClass: "provider_transient", attemptsSoFar: 2 }).retry).toBe(false);

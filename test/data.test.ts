@@ -290,3 +290,81 @@ describe("buildPrompt", () => {
     expect(out).toContain("</elek_config>");
   });
 });
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * exclude_paths must be HONOURED on the solo path, not merely announced.
+ *
+ * The defect: buildPrompt packed the full diff while the <elek_config> block it
+ * emits told the model, verbatim, that excluded files "were removed from the
+ * changed-files diff entirely and were never sent to you". A prompt asserting
+ * work that did not happen — and solo is the default strategy plus the forced
+ * fallback for non-PR runs and mode != review.
+ * ──────────────────────────────────────────────────────────────────────────── */
+describe("buildPrompt honours exclude_paths", () => {
+  const twoFileDiff = [
+    "diff --git a/src/app.ts b/src/app.ts",
+    "--- a/src/app.ts",
+    "+++ b/src/app.ts",
+    "@@ -1,1 +1,2 @@",
+    "+const REAL_SOURCE_MARKER = 1;",
+    "diff --git a/src/app.test.ts b/src/app.test.ts",
+    "--- a/src/app.test.ts",
+    "+++ b/src/app.test.ts",
+    "@@ -1,1 +1,2 @@",
+    "+const EXCLUDED_TEST_MARKER = 1;",
+  ].join("\n");
+
+  const config = (excludePaths: string[]) => ({
+    ignorePaths: [],
+    excludePaths,
+    prioritySourceExtensions: [],
+    instructions: [],
+  });
+
+  it("omits an excluded file from the packed diff", () => {
+    const out = buildPrompt(
+      { ...baseData, diff: twoFileDiff },
+      "",
+      "m",
+      "j",
+      undefined,
+      { repoConfig: config(["**/*.test.ts"]) },
+    );
+
+    expect(out).toContain("REAL_SOURCE_MARKER");
+    expect(out).not.toContain("EXCLUDED_TEST_MARKER");
+  });
+
+  it("keeps the file when nothing excludes it — so the assertion above is not vacuous", () => {
+    // PAIRED DIRECTION. Without this, a packer that dropped everything, or a diff
+    // that never contained the marker, would satisfy the test above.
+    const out = buildPrompt(
+      { ...baseData, diff: twoFileDiff },
+      "",
+      "m",
+      "j",
+      undefined,
+      { repoConfig: config([]) },
+    );
+
+    expect(out).toContain("REAL_SOURCE_MARKER");
+    expect(out).toContain("EXCLUDED_TEST_MARKER");
+  });
+
+  it("does not claim an exclusion it did not perform", () => {
+    // The <elek_config> block states the files "were never sent to you". If the
+    // claim is present, the file must be absent. This is the invariant that was
+    // false before the fix.
+    const out = buildPrompt(
+      { ...baseData, diff: twoFileDiff },
+      "",
+      "m",
+      "j",
+      undefined,
+      { repoConfig: config(["**/*.test.ts"]) },
+    );
+
+    expect(out).toContain("were never sent to you");
+    expect(out).not.toContain("EXCLUDED_TEST_MARKER");
+  });
+});

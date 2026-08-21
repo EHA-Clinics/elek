@@ -31,6 +31,14 @@ export interface ActionInputs {
    */
   openRouterProviderPreferences?: Record<string, unknown>;
   /**
+   * Cap on reasoning tokens per model run. Undefined — the shipped default — means
+   * no cap is sent and no extension is loaded. Whether such a cap binds IS now
+   * measurable, per run, via `nativeTokensReasoning` on `PiRunResult` below; what does
+   * not exist yet is a collected distribution to size one from, so this stays inert
+   * plumbing until a caller has that data and deliberately opts in.
+   */
+  reasoningMaxTokens?: number;
+  /**
    * Stream-idle watchdog, in seconds. 0 disables it.
    *
    * The wall-clock timer above cannot tell a silent process from a slow one:

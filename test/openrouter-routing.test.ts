@@ -17,6 +17,10 @@ import {
   writeRoutingConfig,
   OPENROUTER_ROUTING_KEYS,
 } from "../src/openrouter-routing";
+import {
+  buildReasoningPayload,
+} from "../src/pi-openrouter-observe";
+import { parseReasoningMaxTokensInput } from "../src/github/context";
 
 describe("parseOpenRouterProviderPreferences", () => {
   it("treats an empty value as 'send nothing' — today's behaviour", () => {
@@ -131,5 +135,62 @@ describe("writeRoutingConfig", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * EHAC-2280 step 4 (R-4) — `reasoning_max_tokens`.
+ *
+ * Shipped UNSET and set by nobody. Two facts make that the only responsible default,
+ * and both are asserted rather than asserted-about: pi exposes no `reasoning.max_tokens`
+ * config knob (its `modelOverrides.reasoning` is a boolean capability flag), so this can
+ * only reach the wire through `before_provider_request`; and pi's `Usage` reports no
+ * reasoning tokens, so elek CANNOT currently measure whether such a cap ever binds.
+ */
+describe("reasoning_max_tokens", () => {
+  it("treats an empty value as unset", () => {
+    expect(parseReasoningMaxTokensInput("")).toBeUndefined();
+    expect(parseReasoningMaxTokensInput("  ")).toBeUndefined();
+  });
+
+  it("parses a well-formed value", () => {
+    expect(parseReasoningMaxTokensInput("32000")).toBe(32000);
+  });
+
+  it.each(["0", "-1", "abc", "1e5", "32000.5", "32_000"])(
+    "throws on %p, naming the input",
+    (bad) => {
+      expect(() => parseReasoningMaxTokensInput(bad)).toThrow(/reasoning_max_tokens/);
+    },
+  );
+
+  // The shipped default must be a STRICT no-op. Asserting merely "max_tokens is absent"
+  // would still pass if the handler rebuilt and replaced the payload while changing
+  // nothing — which is a different thing, and the difference is visible to every later
+  // handler in pi's extension chain. So this asserts at reference level.
+  it("is a STRICT no-op when unset — returns undefined, not a rebuilt payload", () => {
+    const payload = { model: "m", reasoning: { effort: "high" }, messages: [] };
+    expect(buildReasoningPayload(payload, undefined)).toBeUndefined();
+  });
+
+  it("preserves every pre-existing reasoning key when set", () => {
+    const payload = { model: "m", reasoning: { effort: "high" }, messages: [] };
+    const capped = buildReasoningPayload(payload, 32000) as any;
+    // Replacing the reasoning object instead of spreading it is the likely mistake, and
+    // it would silently drop review depth to the provider default.
+    expect(capped.reasoning.effort).toBe("high");
+    expect(capped.reasoning.max_tokens).toBe(32000);
+    expect(capped.model).toBe("m");
+  });
+
+  it("does not mutate the payload it was given", () => {
+    const payload = { model: "m", reasoning: { effort: "high" } };
+    buildReasoningPayload(payload, 32000);
+    expect(payload).toEqual({ model: "m", reasoning: { effort: "high" } });
+  });
+
+  it("adds a reasoning object when the payload had none", () => {
+    const capped = buildReasoningPayload({ model: "m" }, 1000) as any;
+    expect(capped.reasoning).toEqual({ max_tokens: 1000 });
   });
 });

@@ -5,6 +5,7 @@
 import * as core from "@actions/core";
 import { readFileSync } from "fs";
 import type { GitHubEntityContext, ActionInputs } from "../types.js";
+import { parseOpenRouterProviderPreferences } from "../openrouter-routing.js";
 
 function parseBooleanInput(value: string, defaultValue: boolean): boolean {
   const normalized = value.trim().toLowerCase();
@@ -156,6 +157,9 @@ export function parseInputs(): ActionInputs {
     maxTurns: parseInt(core.getInput("max_turns") || "20", 10),
     runTimeoutSeconds: parsePositiveIntegerInput("run_timeout_seconds", core.getInput("run_timeout_seconds"), 600),
     jobTimeoutMinutes: parseJobTimeoutMinutesInput(core.getInput("job_timeout_minutes")),
+    openRouterProviderPreferences: parseOpenRouterProviderPreferences(
+      core.getInput("openrouter_provider_preferences"),
+    ),
     stallTimeoutSeconds: parseStallTimeoutSecondsInput(core.getInput("stall_timeout_seconds")),
     tools: core.getInput("tools") || "",
     configPath: core.getInput("config_path") || ".elek.yml",

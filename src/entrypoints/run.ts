@@ -21,6 +21,7 @@ import { join } from "path";
 import { execSync } from "child_process";
 
 import { parseInputs, parseEntityContext } from "../github/context.js";
+import { assessSerialBudget, reportSerialBudget } from "../review/serial-budget.js";
 import {
   applyConfigDefaults,
   formatConfigAuditLog,
@@ -132,6 +133,28 @@ async function run(): Promise<void> {
   activeFinalizer = finalizer;
 
   const parsedInputs = parseInputs();
+
+  // EHAC-2280 (AC #4): assert the SERIAL wall-clock budget before any GitHub fetch
+  // and before any model run. The validator runs AFTER the reviewer lenses, so the
+  // worst case is `setup + 2 * run_timeout_seconds`; if that exceeds the job's own
+  // cap the runner cancels the job mid-flight and the coverage record is lost
+  // entirely — a red check with no findings and nothing to action.
+  //
+  // Failing fast here still emits a coverage record with a legible reason, which is
+  // the whole point: an honest configuration error beats a guillotine 30 minutes in.
+  const budget = assessSerialBudget({
+    runTimeoutSeconds: parsedInputs.runTimeoutSeconds,
+    jobTimeoutMinutes: parsedInputs.jobTimeoutMinutes,
+  });
+  if (reportSerialBudget(budget, core) === "abort") {
+    finalizer.finalize({
+      conclusion: "failure",
+      terminalReason: "configuration_error",
+      failureMessage: budget.message,
+    });
+    return;
+  }
+
   finalizer.update({
     mode: parsedInputs.mode,
     requestedStrategy: parsedInputs.reviewStrategy,

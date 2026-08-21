@@ -24,6 +24,7 @@ import { spawn } from "child_process";
 import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { writeRoutingConfig } from "./openrouter-routing.js";
+import { lookupGenerationRecord, isGenerationLookupApplicable } from "./openrouter-generation.js";
 import { fileURLToPath } from "url";
 import { createInterface } from "readline";
 import type {
@@ -58,6 +59,20 @@ interface PiAssistantMessage {
   stopReason?: string;
   errorMessage?: string;
   usage?: PiUsage;
+  /**
+   * Which provider actually served this message. pi publishes it on every assistant
+   * message (`pi-ai/dist/types.d.ts:292`); elek reads it to decide whether the
+   * OpenRouter generation lookup applies at all, rather than guessing from the id.
+   */
+  provider?: string;
+  /**
+   * The upstream response id, when the API exposes one. For OpenRouter this is the
+   * `gen-…` generation id — `openai-completions.js:311` does
+   * `output.responseId ||= chunk.id`, and the OpenRouter provider is built on that
+   * exact api (`providers/openrouter.js:20`). elek parsed this field out of pi's
+   * stream and discarded it until EHAC-2280; it is the key to who served the run.
+   */
+  responseId?: string;
 }
 
 interface PiUsage {
@@ -583,6 +598,20 @@ export async function runPi(
       const stopReason = finalAssistant?.stopReason;
       const isErrorStop = stopReason === "error" || stopReason === "aborted";
 
+      // EHAC-2280 AC #1. Which OpenRouter endpoint actually served this run — the one
+      // thing `modelLabel` cannot tell us, and the difference between "the review
+      // timed out" and "the review was routed somewhere slow".
+      //
+      // Deliberately AWAITED before resolving, so the value lands on the same
+      // PiRunResult as the run it describes rather than arriving after the coverage
+      // record is written. Bounded by construction (see openrouter-generation.ts) and
+      // incapable of throwing, so it can neither hang nor fail the review; the worst
+      // case is ~10s of extra settlement against a 900s per-run budget.
+      //
+      // Also runs on the FAILURE path on purpose: a lens that failed is exactly the
+      // one whose serving endpoint is worth knowing.
+      const generationFields = await captureGeneration(finalAssistant);
+
       if (!terminationMessage && code === 0 && output && !isErrorStop) {
         resolve({
           conclusion: "success",
@@ -599,6 +628,7 @@ export async function runPi(
             modelLabel: usage.modelLabel,
             source: usage.source,
           },
+          ...generationFields,
           ...telemetry,
         });
       } else {
@@ -633,6 +663,7 @@ export async function runPi(
           },
           failureClass,
           ...(terminationReason ? { terminationReason } : {}),
+          ...generationFields,
           ...telemetry,
         });
       }
@@ -671,6 +702,35 @@ export async function runPi(
       });
     });
   });
+}
+
+/**
+ * Resolve the OpenRouter serving-endpoint fields for one settled run (EHAC-2280).
+ *
+ * Returns `{}` — genuinely ABSENT fields, not nulls — for any run the lookup does not
+ * apply to. That distinction is the whole contract: a non-OpenRouter review's
+ * coverage record stays byte-identical to what it was before this existed, while an
+ * OpenRouter run that could not be resolved records an honest `null` meaning "not
+ * reported". Writing nulls for both would make the two indistinguishable.
+ */
+async function captureGeneration(
+  msg: PiAssistantMessage | undefined,
+): Promise<Partial<PiRunResult>> {
+  const subject = { responseId: msg?.responseId, provider: msg?.provider };
+  // elek's own process holds the key (buildPiEnv passes the SAME value through to pi),
+  // so no new credential plumbing is introduced by this lookup.
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!isGenerationLookupApplicable(subject, apiKey)) return {};
+
+  const record = await lookupGenerationRecord(subject, { apiKey });
+  if (record.servingProvider) {
+    console.log(
+      `pi served by: ${record.servingProvider} · reasoning_tokens=${
+        record.nativeTokensReasoning ?? "n/a"
+      } · generation_time=${record.generationTimeMs ?? "?"}ms · latency=${record.latencyMs ?? "?"}ms`,
+    );
+  }
+  return { ...record, responseId: subject.responseId };
 }
 
 /** Concatenate the text content blocks of an assistant message. */

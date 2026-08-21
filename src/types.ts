@@ -200,6 +200,30 @@ export interface PiRunResult extends PiStreamTelemetry {
     modelLabel: string;
     source: "builtin" | "override" | "provider" | "unknown";
   };
+  /**
+   * What actually served this run on OpenRouter (EHAC-2280, AC #1).
+   *
+   * All four are additive and optional, and all four are ABSENT — not null — on any
+   * run that did not go through OpenRouter, so a non-OpenRouter review's record is
+   * shaped exactly as it was before this existed. When the lookup ran but could not
+   * report, they are `null`, which means "not reported": never a pass, never a
+   * failure. See `src/openrouter-generation.ts` for the proven chain and why the
+   * lookup can never fail a review.
+   */
+  servingProvider?: string | null;
+  /** Always null — not a field of OpenRouter's generation endpoint. See that module. */
+  quantization?: null;
+  /** Reasoning tokens the provider billed. The measurement pi's own Usage lacks. */
+  nativeTokensReasoning?: number | null;
+  generationTimeMs?: number | null;
+  latencyMs?: number | null;
+  /**
+   * pi's `AssistantMessage.responseId` for the decisive attempt — for OpenRouter, the
+   * generation id the capture above is keyed on. Kept on the result because that is
+   * where the lookup reads it from; deliberately NOT copied into the coverage record,
+   * which needs the endpoint name, not a provider-side correlation id.
+   */
+  responseId?: string;
   /** Set whenever `conclusion` is "failure". Absent on success. */
   failureClass?: PiFailureClass;
   /** Set ONLY when elek terminated the child itself. Absent when pi exited on its own. */

@@ -36,6 +36,35 @@ export interface ReviewRunMetric {
   failoverUsed?: boolean;
   /** Physical attempts spent on this logical lens (1 or 2). */
   attemptCount?: number;
+  /**
+   * The OpenRouter endpoint that actually SERVED this run (EHAC-2280, AC #1), e.g.
+   * "DeepInfra". Without it, `modelLabel` alone cannot distinguish "the review timed
+   * out" from "the review was routed to a slow endpoint of the same model" — and
+   * those two call for opposite remedies.
+   *
+   * ABSENT on any run that did not go through OpenRouter. `null` when the lookup ran
+   * and could not report — not reported, never a pass and never a failure. See
+   * `src/openrouter-generation.ts` for the chain, which was proven end to end in CI
+   * rather than assumed, including the positive control that two runs pinned to
+   * different endpoints report different values.
+   */
+  servingProvider?: string | null;
+  /**
+   * Always `null`. Quantization is not a field of OpenRouter's generation endpoint —
+   * confirmed against the live endpoint. It can be CONSTRAINED request-side via
+   * `provider.quantizations` (`src/openrouter-routing.ts`), which is a different
+   * fact, and must never be inferred from.
+   */
+  quantization?: null;
+  /**
+   * Reasoning tokens the serving endpoint billed for this run. pi's own `Usage`
+   * reports none, so this is the only route to the number — and it is what should
+   * size a reasoning cap, rather than benchmark prose.
+   */
+  nativeTokensReasoning?: number | null;
+  /** Provider-reported generation time and time-to-first-token, milliseconds. */
+  generationTimeMs?: number | null;
+  latencyMs?: number | null;
 }
 
 /**
@@ -138,6 +167,18 @@ export function metricFromPiRun(
     ...metadata,
     modelLabel: result.usage.modelLabel,
     ...(result.failureClass ? { failureClass: result.failureClass } : {}),
+    // EHAC-2280 AC #1. Spread with the same idiom as failureClass above so the shape
+    // stays additive: an older consumer of the review summary keeps working and
+    // `version: 1` does not move. Tested `!== undefined`, not truthiness — a real
+    // `null` (looked up, not reported) and a real `0` reasoning-token count must both
+    // survive into the record, and a truthiness test would silently drop them.
+    ...(result.servingProvider !== undefined ? { servingProvider: result.servingProvider } : {}),
+    ...(result.quantization !== undefined ? { quantization: result.quantization } : {}),
+    ...(result.nativeTokensReasoning !== undefined
+      ? { nativeTokensReasoning: result.nativeTokensReasoning }
+      : {}),
+    ...(result.generationTimeMs !== undefined ? { generationTimeMs: result.generationTimeMs } : {}),
+    ...(result.latencyMs !== undefined ? { latencyMs: result.latencyMs } : {}),
     conclusion: result.conclusion,
     turnsUsed: result.turnsUsed,
     providerRetries: result.providerRetries,

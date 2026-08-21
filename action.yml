@@ -91,6 +91,18 @@ inputs:
       it has not earned. When it is set and the arithmetic does not fit, elek fails loudly and runs
       no model. Raise this BEFORE raising `run_timeout_seconds`, never the reverse. (EHAC-2280)
     required: false
+  openrouter_provider_preferences:
+    description: >-
+      OpenRouter provider-routing preferences, as a JSON OBJECT string, passed through verbatim in
+      the `provider` field of the OpenRouter request. Accepts only the thirteen documented routing
+      keys (order, allow_fallbacks, require_parameters, data_collection, only, ignore, quantizations,
+      sort, max_price, preferred_min_throughput, preferred_max_latency, zdr, enforce_distillable_text)
+      and FAILS CLOSED on anything else - a routing policy that cannot be parsed would leave the
+      review with no guardrail behind a green log line. Unset means "send nothing", i.e. exactly
+      today's behaviour. Note that `preferred_min_throughput` / `preferred_max_latency` DEPRIORITISE
+      endpoints over a rolling five-minute window, while `quantizations` / `only` / `ignore` EXCLUDE
+      them - keep `allow_fallbacks: true` unless you have a considered reason not to. (EHAC-2280)
+    required: false
   stall_timeout_seconds:
     description: >
       Stream-idle watchdog, in seconds. Terminates a model run that has emitted

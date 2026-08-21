@@ -23,6 +23,7 @@
 import { spawn } from "child_process";
 import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { dirname, join, resolve } from "path";
+import { writeRoutingConfig } from "./openrouter-routing.js";
 import { fileURLToPath } from "url";
 import { createInterface } from "readline";
 import type {
@@ -238,9 +239,36 @@ export async function runPi(
   const promptFile = join(promptDir, `${promptStem}.md`);
   writeFileSync(promptFile, prompt, "utf-8");
 
+  // EHAC-2280 (AC #2): OpenRouter provider-routing preferences reach the wire through
+  // pi's own config surface, not through a request builder — elek has no OpenRouter
+  // HTTP client. pi documents `compat.openRouterRouting` as "sent as-is in the
+  // `provider` field of the OpenRouter API request" (docs/models.md:458), and the T1
+  // spike confirmed the value actually leaves the process rather than merely being
+  // written to a file: the outgoing payload carried a matching `provider` object,
+  // observed both at pi's hook and at the receiving server.
+  //
+  // Written beside the prompt, under RUNNER_TEMP. Nothing is written when the input is
+  // unset, so an unconfigured caller keeps today's config resolution byte for byte.
+  const routingAgentDir = writeRoutingConfig(tmpDir, inputs.model, inputs.openRouterProviderPreferences);
+
   const piBin = findPiBinary();
   const args = buildPiArgs(inputs, promptFile, !!loadExtensions);
   const env = buildPiEnv(inputs);
+  if (routingAgentDir) {
+    // Relocating the agent dir also relocates pi's `auth.json`. That is safe here and
+    // was checked at source rather than assumed: the OpenRouter provider authenticates
+    // via `envApiKeyAuth([... "OPENROUTER_API_KEY"])`, an environment-variable read, and
+    // buildPiEnv already passes that key through. OAuth-based auth would be affected,
+    // which is why this only happens when a caller opts in.
+    if (process.env.PI_CODING_AGENT_DIR && process.env.PI_CODING_AGENT_DIR !== routingAgentDir) {
+      console.warn(
+        `::warning::openrouter_provider_preferences is set, so PI_CODING_AGENT_DIR is being ` +
+          `redirected from "${process.env.PI_CODING_AGENT_DIR}" to "${routingAgentDir}" for this run. ` +
+          "Any models.json in the original directory will NOT be applied.",
+      );
+    }
+    env.PI_CODING_AGENT_DIR = routingAgentDir;
+  }
 
   console.log(`pi binary: ${piBin}`);
   const cliThinking = piThinkingLevel(inputs.thinking);

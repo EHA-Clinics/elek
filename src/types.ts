@@ -25,6 +25,12 @@ export interface ActionInputs {
    */
   jobTimeoutMinutes?: number;
   /**
+   * OpenRouter provider-routing preferences, already parsed and allowlist-checked.
+   * Undefined means "send nothing" — no `provider` field is added to the request,
+   * which is exactly the behaviour before this input existed.
+   */
+  openRouterProviderPreferences?: Record<string, unknown>;
+  /**
    * Stream-idle watchdog, in seconds. 0 disables it.
    *
    * The wall-clock timer above cannot tell a silent process from a slow one:

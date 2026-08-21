@@ -14,6 +14,17 @@ export interface ActionInputs {
   /** Wall-clock timeout for one pi invocation, in seconds. */
   runTimeoutSeconds: number;
   /**
+   * The caller's own `timeout-minutes` for the review job, mirrored into the
+   * action so the serial wall-clock budget can be asserted BEFORE any model runs
+   * (see `src/review/serial-budget.ts`).
+   *
+   * Optional and undefaulted on purpose. A caller that does not pass it gets an
+   * `unchecked` report and a `::warning::` rather than a silent pass — a guard
+   * that reports success without having checked anything is a gate that cannot
+   * fail.
+   */
+  jobTimeoutMinutes?: number;
+  /**
    * Stream-idle watchdog, in seconds. 0 disables it.
    *
    * The wall-clock timer above cannot tell a silent process from a slow one:

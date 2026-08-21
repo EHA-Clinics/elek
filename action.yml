@@ -81,6 +81,16 @@ inputs:
     description: "Wall-clock timeout for each model run. elek reports a failure review before the outer GitHub step timeout can leave a stale tracking comment."
     required: false
     default: "600"
+  job_timeout_minutes:
+    description: >-
+      The caller's own `timeout-minutes` for the review job, mirrored in so elek can assert the
+      serial wall-clock budget BEFORE any model runs: the validator runs after the reviewer lenses,
+      so the worst case is `setup + 2 x run_timeout_seconds`, and a job cancelled by the outer cap
+      loses its coverage record entirely. Deliberately has NO default: when it is unset elek reports
+      the budget as `unchecked` and emits a warning naming this input, rather than reporting a pass
+      it has not earned. When it is set and the arithmetic does not fit, elek fails loudly and runs
+      no model. Raise this BEFORE raising `run_timeout_seconds`, never the reverse. (EHAC-2280)
+    required: false
   stall_timeout_seconds:
     description: >
       Stream-idle watchdog, in seconds. Terminates a model run that has emitted

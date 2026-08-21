@@ -87,6 +87,42 @@ export function parseStallTimeoutSecondsInput(value: string): number {
 }
 
 /**
+ * Parse `job_timeout_minutes`, FAILING CLOSED on anything unreadable.
+ *
+ * Modelled on `parseStallTimeoutSecondsInput` above rather than on
+ * `parsePositiveIntegerInput`, and for the same reason. This value is only ever
+ * read to assert a safety precondition (see `assessSerialBudget`). A parser that
+ * warned and fell back would resolve a typo into a DIFFERENT cap than the runner
+ * is actually enforcing, and would then cheerfully report that the arithmetic
+ * checks out against a number nobody configured.
+ *
+ * An EMPTY value is not a misconfiguration — it is the documented absence of the
+ * input, and it is what every consumer that has not adopted it yet will send.
+ * Absence returns `undefined` so the guard can report `unchecked` instead of
+ * silently passing.
+ *
+ * @throws {Error} when the value is present and not a positive integer.
+ */
+export function parseJobTimeoutMinutesInput(value: string): number | undefined {
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  // Plain decimal digits ONLY, deliberately stricter than a bare `Number()` check.
+  // `Number("1e2")` is 100 and `Number.isInteger` accepts it, so a `Number()`-based
+  // guard would silently read `1e2` as a 100-minute cap. Anything that is not the
+  // literal integer someone meant to type is a configuration error here.
+  const parsed = /^\d+$/.test(normalized) ? Number(normalized) : NaN;
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `Invalid job_timeout_minutes input: "${normalized}". ` +
+        "Expected a positive integer number of minutes. " +
+        "Refusing to run: this value is used to assert that the serial wall-clock budget fits " +
+        "inside the job cap, and asserting it against a misread number is worse than not asserting it.",
+    );
+  }
+  return parsed;
+}
+
+/**
  * Parse `max_degraded_lenses`, resolving anything unreadable to 0 (strict).
  *
  * Warn-and-clamp rather than throw, unlike `stall_timeout_seconds`: a
@@ -119,6 +155,7 @@ export function parseInputs(): ActionInputs {
     systemPrompt: core.getInput("system_prompt") || "",
     maxTurns: parseInt(core.getInput("max_turns") || "20", 10),
     runTimeoutSeconds: parsePositiveIntegerInput("run_timeout_seconds", core.getInput("run_timeout_seconds"), 600),
+    jobTimeoutMinutes: parseJobTimeoutMinutesInput(core.getInput("job_timeout_minutes")),
     stallTimeoutSeconds: parseStallTimeoutSecondsInput(core.getInput("stall_timeout_seconds")),
     tools: core.getInput("tools") || "",
     configPath: core.getInput("config_path") || ".elek.yml",

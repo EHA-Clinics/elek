@@ -25,6 +25,7 @@ import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { writeRoutingConfig } from "./openrouter-routing.js";
 import { lookupGenerationRecord, isGenerationLookupApplicable } from "./openrouter-generation.js";
+import { REASONING_MAX_TOKENS_ENV } from "./pi-openrouter-observe.js";
 import { fileURLToPath } from "url";
 import { createInterface } from "readline";
 import type {
@@ -283,6 +284,11 @@ export async function runPi(
       );
     }
     env.PI_CODING_AGENT_DIR = routingAgentDir;
+  }
+  if (inputs.reasoningMaxTokens !== undefined) {
+    // Passed by env rather than argv so the value never appears in the logged command
+    // line, matching how every other sensitive-ish value reaches pi.
+    env[REASONING_MAX_TOKENS_ENV] = String(inputs.reasoningMaxTokens);
   }
 
   console.log(`pi binary: ${piBin}`);
@@ -834,6 +840,13 @@ export function buildPiArgs(
   if (loadExtensions) {
     args.push("-e", localPiMcpAdapterPath());
   }
+  // EHAC-2280 step 4: the reasoning cap is applied by a pi extension, because pi has
+  // no reasoning.max_tokens config knob. The extension is loaded ONLY when a caller
+  // set the input — an unconfigured run carries no extension at all, so it cannot
+  // perturb pi's stdout event stream even in principle.
+  if (inputs.reasoningMaxTokens !== undefined) {
+    args.push("-e", localPiReasoningCapPath());
+  }
 
   // Empty model string intentionally means "use this provider's default".
   if (inputs.model) {
@@ -859,6 +872,11 @@ export function buildPiArgs(
 function localPiMcpAdapterPath(): string {
   const packageRoot = process.env.GITHUB_ACTION_PATH || resolve(dirname(fileURLToPath(import.meta.url)), "..");
   return join(packageRoot, "node_modules", "pi-mcp-adapter");
+}
+
+function localPiReasoningCapPath(): string {
+  const packageRoot = process.env.GITHUB_ACTION_PATH || resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  return join(packageRoot, "src", "pi-openrouter-observe.ts");
 }
 
 function localPiReadonlyToolsPath(): string {

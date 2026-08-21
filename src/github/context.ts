@@ -124,6 +124,32 @@ export function parseJobTimeoutMinutesInput(value: string): number | undefined {
 }
 
 /**
+ * Parse `reasoning_max_tokens`, FAILING CLOSED on anything unreadable.
+ *
+ * Same doctrine as the two safety parsers above. An EMPTY value is not a
+ * misconfiguration — it is the SHIPPED DEFAULT. Nothing is sent, no extension is
+ * loaded, and the run is byte-for-byte what it was before this input existed.
+ *
+ * @throws {Error} when the value is present and not a positive integer.
+ */
+export function parseReasoningMaxTokensInput(value: string): number | undefined {
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  // Plain decimal digits only. `Number("1e5")` is 100000 and passes Number.isInteger,
+  // so a bare Number() guard would read `1e5` as a cap nobody typed.
+  const parsed = /^\d+$/.test(normalized) ? Number(normalized) : NaN;
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `Invalid reasoning_max_tokens input: "${normalized}". ` +
+        "Expected a positive integer number of tokens. " +
+        "Refusing to run: a misread value would silently shape the reasoning depth of every " +
+        "review, and a cap is only worth setting against a number you meant to type.",
+    );
+  }
+  return parsed;
+}
+
+/**
  * Parse `max_degraded_lenses`, resolving anything unreadable to 0 (strict).
  *
  * Warn-and-clamp rather than throw, unlike `stall_timeout_seconds`: a
@@ -160,6 +186,7 @@ export function parseInputs(): ActionInputs {
     openRouterProviderPreferences: parseOpenRouterProviderPreferences(
       core.getInput("openrouter_provider_preferences"),
     ),
+    reasoningMaxTokens: parseReasoningMaxTokensInput(core.getInput("reasoning_max_tokens")),
     stallTimeoutSeconds: parseStallTimeoutSecondsInput(core.getInput("stall_timeout_seconds")),
     tools: core.getInput("tools") || "",
     configPath: core.getInput("config_path") || ".elek.yml",

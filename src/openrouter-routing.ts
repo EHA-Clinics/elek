@@ -123,6 +123,24 @@ export function buildModelsJson(
 }
 
 /**
+ * Filesystem-safe slug for a model id, so each model gets its own agent directory.
+ *
+ * Model ids are provider-qualified (`deepseek/deepseek-v4-pro`), so they contain path
+ * separators and cannot be used as a directory name unescaped.
+ */
+export function modelSlug(model: string): string {
+  // `.` stays legal because real model ids carry one (`mimo-v2.5-pro`). Stripping it
+  // from the ENDS is what keeps the result a single, non-traversing path segment: `/`
+  // is already replaced, so the only way out of the parent directory would be a slug
+  // that is entirely dots, and that falls through to the literal below.
+  const slug = String(model ?? "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "")
+    .slice(0, 80);
+  return slug || "model";
+}
+
+/**
  * Write the routing config into a private agent dir under `tmpDir`, returning that
  * dir so the caller can point `PI_CODING_AGENT_DIR` at it.
  *
@@ -146,7 +164,22 @@ export function writeRoutingConfig(
   const { mkdirSync, writeFileSync } = require("fs") as typeof import("fs");
   const { join } = require("path") as typeof import("path");
 
-  const agentDir = join(tmpDir, "pi-agent");
+  // PER-MODEL, and that is load-bearing (EHAC-2294). A council runs its reviewer
+  // lenses CONCURRENTLY (`Promise.all` in entrypoints/run.ts), and every lens reaches
+  // this function through its own `runPi` call. A single shared `pi-agent` directory
+  // therefore had N lenses racing to write ONE `models.json` whose `modelOverrides`
+  // holds exactly one key: last writer won, and every lens whose model was not that
+  // key ran with NO `provider` object at all — silently, because the input still
+  // echoed correctly in the workflow log.
+  //
+  // Measured on eha_care before this fix: `deepseek-v4-flash` (the `tests` lens, the
+  // only lens on that model) kept being served by an endpoint the caller had put in
+  // `ignore`, while `deepseek-v4-pro` — used by 4 of 6 lenses and so the likeliest
+  // last writer — did not.
+  //
+  // Two lenses sharing a model write byte-identical content to the same path, which is
+  // harmless; lenses with different models can no longer collide.
+  const agentDir = join(tmpDir, "pi-agent", modelSlug(model));
   mkdirSync(agentDir, { recursive: true });
   writeFileSync(
     join(agentDir, "models.json"),

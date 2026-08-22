@@ -9,12 +9,13 @@
  */
 import { describe, it, expect } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
 import { tmpdir } from "os";
 import {
   parseOpenRouterProviderPreferences,
   buildModelsJson,
   writeRoutingConfig,
+  modelSlug,
   OPENROUTER_ROUTING_KEYS,
 } from "../src/openrouter-routing";
 import {
@@ -110,7 +111,7 @@ describe("writeRoutingConfig", () => {
     const tmp = mkdtempSync(join(tmpdir(), "elek-routing-"));
     try {
       const dir = writeRoutingConfig(tmp, "deepseek/deepseek-v4-pro", { allow_fallbacks: true });
-      expect(dir).toBe(join(tmp, "pi-agent"));
+      expect(dir).toBe(join(tmp, "pi-agent", "deepseek-deepseek-v4-pro"));
       const doc = JSON.parse(readFileSync(join(dir!, "models.json"), "utf-8"));
       expect(
         doc.providers.openrouter.modelOverrides["deepseek/deepseek-v4-pro"].compat.openRouterRouting,
@@ -127,13 +128,82 @@ describe("writeRoutingConfig", () => {
     writeFileSync(join(existing, "models.json"), '{"providers":{"anthropic":{"baseUrl":"x"}}}', "utf-8");
     try {
       const dir = writeRoutingConfig(tmp, "m", { allow_fallbacks: true }, existing);
-      expect(dir).toBe(join(tmp, "pi-agent"));
+      expect(dir).toBe(join(tmp, "pi-agent", "m"));
       // Their file is untouched.
       expect(JSON.parse(readFileSync(join(existing, "models.json"), "utf-8"))).toEqual({
         providers: { anthropic: { baseUrl: "x" } },
       });
     } finally {
       rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * EHAC-2294 — THE REGRESSION THIS FILE EXISTS FOR.
+   *
+   * A council runs its reviewer lenses concurrently, and each lens calls
+   * writeRoutingConfig with ITS OWN model. While every lens shared one `pi-agent`
+   * directory, they raced to write a single `models.json` whose `modelOverrides` holds
+   * exactly one key — last writer won and every other lens ran with NO `provider`
+   * object, silently, while the input still echoed correctly in the workflow log.
+   *
+   * Measured on eha_care before the fix: the one lens on `deepseek-v4-flash` kept being
+   * served by an endpoint the caller had explicitly put in `ignore`.
+   */
+  it("gives each model its own agent dir, so concurrent lenses cannot clobber each other", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "elek-routing-"));
+    try {
+      const prefs = { ignore: ["digitalocean"] };
+      const models = [
+        "deepseek/deepseek-v4-pro",
+        "xiaomi/mimo-v2.5-pro",
+        "deepseek/deepseek-v4-flash",
+      ];
+      // Interleaved exactly as Promise.all would: every lens writes before any reads.
+      const dirs = models.map((m) => writeRoutingConfig(tmp, m, prefs)!);
+
+      expect(new Set(dirs).size).toBe(models.length);
+
+      // EVERY model still has its own routing after all the writes have landed.
+      for (const [i, m] of models.entries()) {
+        const doc = JSON.parse(readFileSync(join(dirs[i], "models.json"), "utf-8"));
+        const overrides = doc.providers.openrouter.modelOverrides;
+        expect(Object.keys(overrides)).toEqual([m]);
+        expect(overrides[m].compat.openRouterRouting).toEqual(prefs);
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("POSITIVE CONTROL: a shared directory really would have lost all but one model", () => {
+    // Proves the test above is not vacuous — with the slug removed, the three writes
+    // collapse onto one path and only the last model survives.
+    const tmp = mkdtempSync(join(tmpdir(), "elek-routing-"));
+    try {
+      const shared = join(tmp, "pi-agent");
+      mkdirSync(shared, { recursive: true });
+      for (const m of ["a/one", "b/two", "c/three"]) {
+        writeFileSync(join(shared, "models.json"), JSON.stringify(buildModelsJson(m, {})), "utf-8");
+      }
+      const doc = JSON.parse(readFileSync(join(shared, "models.json"), "utf-8"));
+      expect(Object.keys(doc.providers.openrouter.modelOverrides)).toEqual(["c/three"]);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("modelSlug makes a provider-qualified id safe as a single directory segment", () => {
+    expect(modelSlug("deepseek/deepseek-v4-pro")).toBe("deepseek-deepseek-v4-pro");
+    // A dot is legal INSIDE a slug — real model ids carry one.
+    expect(modelSlug("xiaomi/mimo-v2.5-pro")).toBe("xiaomi-mimo-v2.5-pro");
+    expect(modelSlug("")).toBe("model");
+
+    // The property that actually matters: whatever the input, the agent dir stays
+    // INSIDE its parent. Asserted by resolution, not by inspecting the string.
+    for (const hostile of ["a/../../etc/passwd", "..", "../..", "/", "...", "./."]) {
+      const resolved = resolve(join("/base", "pi-agent", modelSlug(hostile)));
+      expect(resolved.startsWith(resolve("/base", "pi-agent") + "/")).toBe(true);
     }
   });
 });

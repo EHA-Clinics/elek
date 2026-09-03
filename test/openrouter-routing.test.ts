@@ -8,9 +8,11 @@
  * recognise, and why every rejection is covered here.
  */
 import { describe, it, expect } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { tmpdir } from "os";
+import { pathToFileURL } from "node:url";
 import {
   parseOpenRouterProviderPreferences,
   buildModelsJson,
@@ -97,6 +99,31 @@ describe("buildModelsJson", () => {
 });
 
 describe("writeRoutingConfig", () => {
+  it("runs under the Node ESM loader used by the composite action", () => {
+    const moduleUrl = pathToFileURL(resolve("src/openrouter-routing.ts")).href;
+    const program = `
+      import { existsSync, mkdtempSync, rmSync } from "node:fs";
+      import { join } from "node:path";
+      import { tmpdir } from "node:os";
+      import { writeRoutingConfig } from ${JSON.stringify(moduleUrl)};
+
+      const tmp = mkdtempSync(join(tmpdir(), "elek-routing-esm-"));
+      try {
+        const dir = writeRoutingConfig(tmp, "deepseek/deepseek-v4-pro", { allow_fallbacks: true });
+        if (!dir || !existsSync(join(dir, "models.json"))) process.exitCode = 2;
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    `;
+    const result = spawnSync(
+      "node",
+      ["--import", "tsx", "--input-type=module", "--eval", program],
+      { encoding: "utf8" },
+    );
+
+    expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+  });
+
   it("writes nothing and returns undefined when preferences are unset", () => {
     const tmp = mkdtempSync(join(tmpdir(), "elek-routing-"));
     try {

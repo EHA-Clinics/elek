@@ -1,5 +1,5 @@
 <!--
-Thanks for the PR. The dual-model bot review will run automatically.
+Thanks for the PR. The advisory AI review council will run automatically.
 A few quick checks before you submit:
 -->
 
@@ -10,7 +10,7 @@ A few quick checks before you submit:
 ## How this was tested
 
 - [ ] `bun test test/` passes
-- [ ] `bunx tsc --noEmit` clean
+- [ ] `npm run typecheck` clean
 - [ ] Manual run on a real PR (link / screenshot)
 
 ## Risk

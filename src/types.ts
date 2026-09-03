@@ -234,6 +234,10 @@ export interface PiRunResult extends PiStreamTelemetry {
   responseId?: string;
   /** Set whenever `conclusion` is "failure". Absent on success. */
   failureClass?: PiFailureClass;
+  /** Structured provider HTTP status recovered without parsing arbitrary prose. */
+  providerHttpStatus?: number;
+  /** Bounded provider routing-policy reasons, when the structured envelope reports them. */
+  providerIneligibilityReasons?: string[];
   /** Set ONLY when elek terminated the child itself. Absent when pi exited on its own. */
   terminationReason?: PiTerminationReason;
 }

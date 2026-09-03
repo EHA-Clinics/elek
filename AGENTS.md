@@ -116,9 +116,9 @@ This is the backstop layer if anyone ever adds the wrong code path.
 ## Running locally
 
 ```bash
-bun install
-bun test test/        # unit tests, ~89 of them
-bunx tsc --noEmit     # type check
+npm ci
+bun test test/        # 500+ unit and integration tests
+npm run typecheck     # type check
 ```
 
 To dry-run pi from a debug workspace (requires DeepSeek or OpenRouter API key set):
@@ -133,7 +133,8 @@ PATH="$(pwd)/node_modules/.bin:$PATH" pi --mode json --provider deepseek \
 Three workflows in `.github/workflows/` plus Dependabot configuration in
 `.github/dependabot.yml`:
 
-- `ci.yml` — `bun test test/` + `bunx tsc --noEmit` on every PR. 5-min
+- `ci.yml` — lockfile install, runtime audit, `bun test test/`, and
+  `npm run typecheck` on every PR. 5-min
   timeout, `contents:read` perms only, concurrency-grouped. This is the
   hard merge gate and intentionally runs on docs-only PRs too so branch
   protection never waits on a skipped required check.
@@ -156,7 +157,7 @@ transient model failures.
 2. If it's behavioral, write a failing test in `test/` first.
 3. Keep the change minimal — no speculative refactors.
 4. Use a product/work branch name and a Conventional Commit style PR title.
-5. Run `bun test test/` and `bunx tsc --noEmit` before pushing.
+5. Run `bun test test/` and `npm run typecheck` before pushing.
 6. The PR will get reviewed by the bot itself; respond by addressing each
    prior finding (see `<comments>` / prior bot reviews in PR thread).
 

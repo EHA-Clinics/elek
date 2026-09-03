@@ -27,6 +27,9 @@
  * key and callers may have a considered reason; nothing here encourages it.
  */
 
+import { mkdirSync, writeFileSync } from "fs";
+import { join } from "path";
+
 /**
  * The thirteen documented OpenRouter provider-routing keys.
  * https://openrouter.ai/docs/guides/routing/provider-selection
@@ -158,11 +161,6 @@ export function writeRoutingConfig(
   _existingAgentDir?: string,
 ): string | undefined {
   if (!preferences) return undefined;
-  // Imported lazily so this module stays trivially unit-testable and free of
-  // import-time side effects.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { mkdirSync, writeFileSync } = require("fs") as typeof import("fs");
-  const { join } = require("path") as typeof import("path");
 
   // PER-MODEL, and that is load-bearing (EHAC-2294). A council runs its reviewer
   // lenses CONCURRENTLY (`Promise.all` in entrypoints/run.ts), and every lens reaches

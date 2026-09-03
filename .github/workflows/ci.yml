@@ -40,4 +40,15 @@ jobs:
         run: npm run typecheck
 
       - name: Audit runtime dependencies
-        run: npm audit --omit=dev --audit-level=high
+        run: |
+          for attempt in 1 2 3; do
+            if npm audit --omit=dev --audit-level=high --fetch-retries=0 --fetch-timeout=60000; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::npm audit failed after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::npm audit attempt $attempt failed; retrying after $((attempt * 30)) seconds"
+            sleep $((attempt * 30))
+          done

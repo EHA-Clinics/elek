@@ -63,6 +63,12 @@ function attemptMetric(params: {
     failover: params.failover,
     conclusion: result.conclusion,
     ...(result.failureClass ? { failureClass: result.failureClass } : {}),
+    ...(result.providerHttpStatus !== undefined
+      ? { providerHttpStatus: result.providerHttpStatus }
+      : {}),
+    ...(result.providerIneligibilityReasons
+      ? { providerIneligibilityReasons: result.providerIneligibilityReasons }
+      : {}),
     ...(result.terminationReason ? { terminationReason: result.terminationReason } : {}),
     durationSeconds: roundSeconds(result.durationSeconds),
     turnsUsed: result.turnsUsed,

@@ -862,6 +862,12 @@ async function run(): Promise<void> {
     failover: false,
     conclusion: result.conclusion,
     ...(result.failureClass ? { failureClass: result.failureClass } : {}),
+    ...(result.providerHttpStatus !== undefined
+      ? { providerHttpStatus: result.providerHttpStatus }
+      : {}),
+    ...(result.providerIneligibilityReasons
+      ? { providerIneligibilityReasons: result.providerIneligibilityReasons }
+      : {}),
     ...(result.terminationReason ? { terminationReason: result.terminationReason } : {}),
     durationSeconds: Math.round(Math.max(0, result.durationSeconds) * 10) / 10,
     turnsUsed: result.turnsUsed,

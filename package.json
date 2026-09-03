@@ -1,13 +1,13 @@
 {
   "name": "elek",
-  "version": "1.1.4",
+  "version": "1.4.2",
   "description": "Model-agnostic AI code review for GitHub Actions with cross-model validation and a tightly scoped review-only tool surface.",
   "type": "module",
-  "homepage": "https://github.com/selimozten/elek",
-  "bugs": "https://github.com/selimozten/elek/issues",
+  "homepage": "https://github.com/EHA-Clinics/elek",
+  "bugs": "https://github.com/EHA-Clinics/elek/issues",
   "repository": {
     "type": "git",
-    "url": "https://github.com/selimozten/elek.git"
+    "url": "https://github.com/EHA-Clinics/elek.git"
   },
   "scripts": {
     "build": "tsc",

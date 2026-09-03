@@ -28,6 +28,8 @@ export interface ReviewRunMetric {
    * that one entry was reached without splitting it into two.
    */
   failureClass?: PiFailureClass;
+  providerHttpStatus?: number;
+  providerIneligibilityReasons?: string[];
   /** The model this lens was originally assigned, before any failover. */
   assignedModelLabel?: string;
   /** The model the decisive attempt ran on. Equals modelLabel; named for the census. */
@@ -87,6 +89,8 @@ export interface ReviewAttemptMetric {
   failover: boolean;
   conclusion: "success" | "failure";
   failureClass?: PiFailureClass;
+  providerHttpStatus?: number;
+  providerIneligibilityReasons?: string[];
   terminationReason?: string;
   durationSeconds: number;
   turnsUsed: number;
@@ -167,6 +171,12 @@ export function metricFromPiRun(
     ...metadata,
     modelLabel: result.usage.modelLabel,
     ...(result.failureClass ? { failureClass: result.failureClass } : {}),
+    ...(result.providerHttpStatus !== undefined
+      ? { providerHttpStatus: result.providerHttpStatus }
+      : {}),
+    ...(result.providerIneligibilityReasons
+      ? { providerIneligibilityReasons: result.providerIneligibilityReasons }
+      : {}),
     // EHAC-2280 AC #1. Spread with the same idiom as failureClass above so the shape
     // stays additive: an older consumer of the review summary keeps working and
     // `version: 1` does not move. Tested `!== undefined`, not truthiness — a real

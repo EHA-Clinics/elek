@@ -3,7 +3,7 @@
  * Calls back on progress events so the orchestrator can update the tracking comment
  * step-by-step, matching the progressive checklist UX users expect.
  *
- * Event format (verified against pi 0.72.1, see /opt/homebrew/.../docs/json.md):
+ * Event format verified against the lockfile-pinned pi 0.84.2:
  *   - {"type":"session", id, version, ...}                 first line, session header
  *   - {"type":"agent_start"} | {"type":"agent_end", messages:[...]}
  *   - {"type":"turn_start"} | {"type":"turn_end", message, toolResults}
@@ -184,6 +184,59 @@ export function providerStatusFromEvent(event: unknown): number | undefined {
   return undefined;
 }
 
+export interface ProviderErrorEnvelope {
+  status: number;
+  ineligibilityReasons: string[];
+}
+
+function sanitizeProviderReason(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 128);
+}
+
+/**
+ * Parse pi's exact `<status>: <JSON object>` provider-error envelope.
+ *
+ * The full-string anchor, integer body code, and prefix/body agreement are all
+ * load-bearing. They let elek recover structured state that pi serialized into
+ * `errorMessage` without teaching retry policy to guess from provider prose.
+ */
+export function providerErrorFromMessage(message: unknown): ProviderErrorEnvelope | undefined {
+  if (typeof message !== "string") return undefined;
+  const match = /^\s*(\d{3}):\s*(\{[\s\S]*\})\s*$/.exec(message);
+  if (!match) return undefined;
+
+  const status = Number(match[1]);
+  let body: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(match[2]);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    body = parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+
+  if (!Number.isInteger(body.code) || body.code !== status) return undefined;
+
+  const metadata = body.metadata;
+  const rawReasons =
+    metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? (metadata as Record<string, unknown>).ineligibility_reasons
+      : undefined;
+  const ineligibilityReasons = Array.isArray(rawReasons)
+    ? rawReasons
+        .flatMap((item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+          const reason = (item as Record<string, unknown>).reason;
+          if (typeof reason !== "string") return [];
+          const sanitized = sanitizeProviderReason(reason);
+          return sanitized ? [sanitized] : [];
+        })
+        .slice(0, 10)
+    : [];
+
+  return { status, ineligibilityReasons };
+}
+
 /**
  * Decide ONE terminal class for a failed pi run, most-specific fact first.
  *
@@ -311,6 +364,7 @@ export async function runPi(
   let terminationReason: PiTerminationReason | undefined;
   /** Established from STRUCTURED provider state only — never from message text. */
   let providerFailureClass: PiFailureClass | undefined;
+  let providerHttpStatus: number | undefined;
   let settled = false;
   // Stream-idle telemetry. Emitted on every terminal path so the watchdog
   // threshold can be calibrated from successful runs rather than guessed.
@@ -489,6 +543,7 @@ export async function runPi(
       // than acted on: the terminal class is decided once, at settlement.
       const providerStatus = providerStatusFromEvent(event);
       if (providerStatus !== undefined && providerFailureClass === undefined) {
+        providerHttpStatus = providerStatus;
         providerFailureClass = classifyProviderStatus(providerStatus);
       }
 
@@ -603,6 +658,11 @@ export async function runPi(
       });
       const stopReason = finalAssistant?.stopReason;
       const isErrorStop = stopReason === "error" || stopReason === "aborted";
+      const messageProviderError = providerErrorFromMessage(lastErrorMessage);
+      if (providerHttpStatus === undefined && messageProviderError) {
+        providerHttpStatus = messageProviderError.status;
+        providerFailureClass = classifyProviderStatus(messageProviderError.status);
+      }
 
       // EHAC-2280 AC #1. Which OpenRouter endpoint actually served this run — the one
       // thing `modelLabel` cannot tell us, and the difference between "the review
@@ -669,6 +729,11 @@ export async function runPi(
           },
           failureClass,
           ...(terminationReason ? { terminationReason } : {}),
+          ...(providerHttpStatus !== undefined ? { providerHttpStatus } : {}),
+          ...(messageProviderError && messageProviderError.status === providerHttpStatus &&
+          messageProviderError.ineligibilityReasons.length > 0
+            ? { providerIneligibilityReasons: messageProviderError.ineligibilityReasons }
+            : {}),
           ...generationFields,
           ...telemetry,
         });

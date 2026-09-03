@@ -7,6 +7,7 @@ import {
   buildPiArgs,
   classifyProviderStatus,
   classifyRunFailure,
+  providerErrorFromMessage,
   providerStatusFromEvent,
   runPi,
 } from "../src/pi";
@@ -349,6 +350,37 @@ describe("providerStatusFromEvent", () => {
       providerStatusFromEvent({ type: "message_end", message: { errorMessage: "429 Too Many Requests" } }),
     ).toBeUndefined();
     expect(providerStatusFromEvent({ type: "error", code: "rate_limit_exceeded" })).toBeUndefined();
+  });
+});
+
+describe("providerErrorFromMessage", () => {
+  it("parses the exact structured provider envelope emitted by pi", () => {
+    const error = providerErrorFromMessage(
+      '404: {"message":"0 endpoints available","code":404,"metadata":{"ineligibility_reasons":[{"reason":"model-ignored-by-guardrail"}]}}',
+    );
+
+    expect(error).toEqual({
+      status: 404,
+      ineligibilityReasons: ["model-ignored-by-guardrail"],
+    });
+  });
+
+  it("rejects prose, malformed JSON, string codes, and status mismatches", () => {
+    expect(providerErrorFromMessage('request failed with 404: {"code":404}')).toBeUndefined();
+    expect(providerErrorFromMessage('404: {"code":')).toBeUndefined();
+    expect(providerErrorFromMessage('404: {"code":"404"}')).toBeUndefined();
+    expect(providerErrorFromMessage('404: {"code":403}')).toBeUndefined();
+  });
+
+  it("bounds and sanitizes provider-owned reason values", () => {
+    const reasons = Array.from({ length: 12 }, (_, index) => ({
+      reason: `${index}\u0000${"x".repeat(140)}`,
+    }));
+    const error = providerErrorFromMessage(`404: ${JSON.stringify({ code: 404, metadata: { ineligibility_reasons: reasons } })}`);
+
+    expect(error?.ineligibilityReasons).toHaveLength(10);
+    expect(error?.ineligibilityReasons[0]).not.toContain("\u0000");
+    expect(error?.ineligibilityReasons[0]?.length).toBe(128);
   });
 });
 
@@ -711,6 +743,31 @@ describe("runPi stream-idle watchdog", () => {
 
       expect(result.conclusion).toBe("failure");
       expect(result.failureClass).toBe("provider_transient");
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("classifies pi's structured errorMessage envelope without guessing from prose", async () => {
+    const { cleanup } = fakePi("provider-envelope", [
+      "#!/usr/bin/env node",
+      "const body = { message: 'blocked', code: 404, metadata: { ineligibility_reasons: [{ reason: 'model-ignored-by-guardrail' }] } };",
+      "console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', content: [], stopReason: 'error', errorMessage: `404: ${JSON.stringify(body)}` }] }));",
+      "process.exit(0);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 10, stallTimeoutSeconds: 5 },
+        undefined,
+        false,
+        { promptName: "provider-envelope" },
+      );
+
+      expect(result.conclusion).toBe("failure");
+      expect(result.failureClass).toBe("provider_permanent");
+      expect(result.providerHttpStatus).toBe(404);
+      expect(result.providerIneligibilityReasons).toEqual(["model-ignored-by-guardrail"]);
     } finally {
       cleanup();
     }

@@ -58,6 +58,8 @@ describe("review summary", () => {
       costUsd: 0.004,
       durationSeconds: 65.66,
       providerRetries: 2,
+      providerHttpStatus: 404,
+      providerIneligibilityReasons: ["model-ignored-by-guardrail"],
     });
     const validator = piResult();
     const costTotal = aggregateCosts([
@@ -146,6 +148,8 @@ describe("review summary", () => {
       durationSeconds: 65.7,
       providerRetries: 2,
       pricingSource: "override",
+      providerHttpStatus: 404,
+      providerIneligibilityReasons: ["model-ignored-by-guardrail"],
     });
     expect(summary.modelRuns[1]).toMatchObject({
       role: "validator-review",

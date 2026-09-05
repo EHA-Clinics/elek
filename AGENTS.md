@@ -134,7 +134,7 @@ Three workflows in `.github/workflows/` plus Dependabot configuration in
 `.github/dependabot.yml`:
 
 - `ci.yml` — lockfile install, runtime audit, `bun test test/`, and
-  `npm run typecheck` on every PR. 5-min
+  `npm run typecheck` on every PR. 15-min
   timeout, `contents:read` perms only, concurrency-grouped. This is the
   hard merge gate and intentionally runs on docs-only PRs too so branch
   protection never waits on a skipped required check.
@@ -142,7 +142,7 @@ Three workflows in `.github/workflows/` plus Dependabot configuration in
   main push, weekly schedule, and manual dispatch. This is also required by
   branch protection.
 - `elek.yml` — runs the action on itself (deepseek-v4-pro + OpenRouter Kimi).
-  10-min timeout, concurrency cancels stale runs on new push, ignores
+  20-min job timeout with a 12-min action step timeout, concurrency cancels stale runs on new push, ignores
   docs-only changes. This is advisory because provider quota and transient
   model failures should not block a test-clean PR.
 - `.github/dependabot.yml` — grouped weekly dependency update automation.

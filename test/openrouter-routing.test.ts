@@ -270,14 +270,27 @@ describe("reasoning_max_tokens", () => {
     expect(buildReasoningPayload(payload, undefined)).toBeUndefined();
   });
 
-  it("preserves every pre-existing reasoning key when set", () => {
-    const payload = { model: "m", reasoning: { effort: "high" }, messages: [] };
+  it("replaces effort with a cap while preserving unrelated reasoning fields", () => {
+    const payload = { model: "m", reasoning: { effort: "high", exclude: true }, messages: [] };
     const capped = buildReasoningPayload(payload, 32000) as any;
-    // Replacing the reasoning object instead of spreading it is the likely mistake, and
-    // it would silently drop review depth to the provider default.
-    expect(capped.reasoning.effort).toBe("high");
+    expect(capped.reasoning.effort).toBeUndefined();
+    expect(capped.reasoning.exclude).toBe(true);
     expect(capped.reasoning.max_tokens).toBe(32000);
     expect(capped.model).toBe("m");
+  });
+
+  it("rewrites MiMo to provider-default reasoning without altering routing or tools", () => {
+    const payload = {
+      model: "xiaomi/mimo-v2.5-pro",
+      reasoning: { effort: "high", exclude: true },
+      provider: { require_parameters: true, data_collection: "deny", ignore: ["digitalocean"] },
+      tools: [{ type: "function" }],
+      messages: [],
+      max_tokens: 1024,
+    };
+    expect(buildReasoningPayload(payload, undefined, { mode: "enabled", thinking: "high" })).toEqual({
+      ...payload, reasoning: { enabled: true, exclude: true },
+    });
   });
 
   it("does not mutate the payload it was given", () => {

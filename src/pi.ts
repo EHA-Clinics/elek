@@ -25,7 +25,11 @@ import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { writeRoutingConfig } from "./openrouter-routing.js";
 import { lookupGenerationRecord, isGenerationLookupApplicable } from "./openrouter-generation.js";
-import { REASONING_MAX_TOKENS_ENV } from "./pi-openrouter-observe.js";
+import {
+  REASONING_MAX_TOKENS_ENV, REASONING_MODES_ENV, REASONING_THINKING_ENV, REASONING_TELEMETRY_PREFIX, REASONING_NOT_APPLICABLE,
+  parseReasoningTelemetry, piThinkingLevel, validateReasoningSchedule,
+  type ReasoningTelemetry,
+} from "./openrouter-reasoning.js";
 import { fileURLToPath } from "url";
 import { createInterface } from "readline";
 import type {
@@ -295,6 +299,7 @@ export async function runPi(
   loadExtensions?: boolean,
   options: { promptName?: string } = {},
 ): Promise<PiRunResult> {
+  validateReasoningSchedule(inputs.reasoningMaxTokens, [inputs.thinking]);
   const tmpDir = process.env.RUNNER_TEMP || "/tmp";
   const promptDir = join(tmpDir, "pi-prompts");
   if (!existsSync(promptDir)) {
@@ -338,21 +343,18 @@ export async function runPi(
     }
     env.PI_CODING_AGENT_DIR = routingAgentDir;
   }
-  if (inputs.reasoningMaxTokens !== undefined) {
-    // Passed by env rather than argv so the value never appears in the logged command
-    // line, matching how every other sensitive-ish value reaches pi.
-    env[REASONING_MAX_TOKENS_ENV] = String(inputs.reasoningMaxTokens);
-  }
 
   console.log(`pi binary: ${piBin}`);
   const cliThinking = piThinkingLevel(inputs.thinking);
   console.log(
-    `Provider: ${inputs.provider}, Model: ${inputs.model || "default"}, Thinking: ${
+    `Provider: ${inputs.provider}, Model: ${inputs.model || "default"}, Requested thinking: ${
       cliThinking === inputs.thinking ? inputs.thinking : `${inputs.thinking} (pi ${cliThinking})`
     }`,
   );
   const runModelLabel = modelLabelFor(inputs);
 
+  let reasoning: ReasoningTelemetry | undefined;
+  let reasoningObserved = false;
   const startTime = Date.now();
   let sessionId: string | undefined;
   let toolCount = 0;
@@ -490,6 +492,7 @@ export async function runPi(
           firstEventAt === undefined ? null : roundSeconds((firstEventAt - startTime) / 1000),
         maxIdleSecondsObserved: roundSeconds(maxIdleSeconds),
         streamEventCount,
+        ...(reasoning ? { reasoning } : {}),
         malformedLineCount,
         ...(lastEventType ? { lastEventType } : {}),
       };
@@ -501,8 +504,24 @@ export async function runPi(
     let stderr = "";
     let stdoutRaw = "";
 
-    child.stderr!.on("data", (data) => {
-      stderr += data.toString();
+    const stderrLines = createInterface({ input: child.stderr! });
+    stderrLines.on("line", (line) => {
+      if (!line.startsWith(REASONING_TELEMETRY_PREFIX)) {
+        stderr += `${line}\n`;
+        return;
+      }
+      if (line === REASONING_NOT_APPLICABLE) {
+        reasoningObserved = true;
+        reasoning = undefined;
+        return;
+      }
+      const observed = parseReasoningTelemetry(line);
+      if (!observed || observed.requestedThinking !== inputs.thinking.trim().toLowerCase()) return;
+      reasoning = observed;
+      reasoningObserved = true;
+      console.log(`Reasoning: requested=${observed.requestedThinking} pi=${observed.piThinking} ` +
+        `configuredMode=${observed.configuredMode} effectiveControl=${observed.effectiveControl} ` +
+        `adapted=${observed.adapted}`);
     });
 
     if (!useJsonMode) {
@@ -678,7 +697,9 @@ export async function runPi(
       // one whose serving endpoint is worth knowing.
       const generationFields = await captureGeneration(finalAssistant);
 
-      if (!terminationMessage && code === 0 && output && !isErrorStop) {
+      const missingReasoning = needsReasoningExtension(inputs) && !reasoningObserved;
+      const otherwiseSuccessful = !terminationMessage && code === 0 && Boolean(output) && !isErrorStop;
+      if (!terminationMessage && code === 0 && output && !isErrorStop && !missingReasoning) {
         resolve({
           conclusion: "success",
           output,
@@ -700,11 +721,12 @@ export async function runPi(
       } else {
         const errMsg =
           terminationMessage ||
+          (missingReasoning && otherwiseSuccessful ? "Reasoning request telemetry missing from configured Pi extension" : "") ||
           lastErrorMessage ||
           output ||
           stderr.trim().slice(-500) ||
           `pi exited with code ${code}`;
-        const failureClass = classifyRunFailure({
+        const failureClass = missingReasoning && otherwiseSuccessful ? "process_error" : classifyRunFailure({
           terminationReason,
           providerFailureClass,
           exitCode: code,
@@ -905,11 +927,9 @@ export function buildPiArgs(
   if (loadExtensions) {
     args.push("-e", localPiMcpAdapterPath());
   }
-  // EHAC-2280 step 4: the reasoning cap is applied by a pi extension, because pi has
-  // no reasoning.max_tokens config knob. The extension is loaded ONLY when a caller
-  // set the input — an unconfigured run carries no extension at all, so it cannot
-  // perturb pi's stdout event stream even in principle.
-  if (inputs.reasoningMaxTokens !== undefined) {
+  // A configured map observes each attempt, including unchanged effort-mode payloads.
+  // This makes telemetry reflect Pi's resolved model and thinking-level mapping.
+  if (needsReasoningExtension(inputs)) {
     args.push("-e", localPiReasoningCapPath());
   }
 
@@ -966,8 +986,8 @@ function usesReadonlyReviewTools(inputs: ActionInputs): boolean {
   return hasReadonlyTool && !hasMutationTool;
 }
 
-function piThinkingLevel(value: string): string {
-  return value.trim().toLowerCase() === "max" ? "xhigh" : value;
+function needsReasoningExtension(inputs: ActionInputs): boolean {
+  return inputs.reasoningMaxTokens !== undefined || Object.keys(inputs.openRouterReasoningModes ?? {}).length > 0;
 }
 
 /**
@@ -982,6 +1002,11 @@ function piThinkingLevel(value: string): string {
  */
 function buildPiEnv(inputs: ActionInputs): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
+  if (needsReasoningExtension(inputs)) {
+    env[REASONING_MODES_ENV] = JSON.stringify(inputs.openRouterReasoningModes ?? {});
+    env[REASONING_THINKING_ENV] = inputs.thinking.trim().toLowerCase();
+    if (inputs.reasoningMaxTokens !== undefined) env[REASONING_MAX_TOKENS_ENV] = String(inputs.reasoningMaxTokens);
+  }
 
   // Baseline allowed in every mode: locale, temp dirs, and pi's own paths.
   const baseAllowedVars = [

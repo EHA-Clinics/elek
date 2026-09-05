@@ -11,7 +11,9 @@ A few quick checks before you submit:
 
 - [ ] `bun test test/` passes
 - [ ] `npm run typecheck` clean
-- [ ] Manual run on a real PR (link / screenshot)
+- [ ] `npm audit --omit=dev --audit-level=high` passes
+- [ ] Action input declaration, exact `INPUT_*` mapping, parser, types, tests, and docs agree
+- [ ] Immutable live-canary evidence (caller PR head, action/workflow SHAs, run/artifact links) supplied; for an inert action release, link the rollout plan that requires caller canaries before adoption
 
 ## Risk
 

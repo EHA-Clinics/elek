@@ -329,13 +329,52 @@ Full architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | `allowed_bots` | _(empty)_ | Comma-separated bot logins, or `*` for all |
 | `sticky_comment` | `true` | Reuse the same tracking comment across pushes |
 
+### OpenRouter reasoning controls
+
+`openrouter_model_reasoning_modes` is an optional JSON object. For example:
+
+```yaml
+openrouter_model_reasoning_modes: '{"xiaomi/mimo-v2.5-pro":"enabled"}'
+thinking: high
+```
+
+A model absent from the map uses `effort` and preserves Pi's request. `enabled` replaces the
+named effort with `reasoning: {enabled: true}`. This requests provider-default reasoning;
+`thinking: high` does not mean that a binary model ran at named high effort. Keys use canonical
+OpenRouter IDs; a leading `openrouter/` is normalized. Invalid JSON, non-object values, invalid
+IDs, duplicate keys, conflicting normalized keys, and modes other than `effort`/`enabled` fail
+before model execution. The map has no runtime catalog dependency.
+
+| Input | Default | Behavior |
+|---|---|---|
+| `openrouter_model_reasoning_modes` | _(empty)_ | Explicit `effort`/`enabled` capability map |
+| `reasoning_max_tokens` | _(unset)_ | OpenRouter token budget replacing both effort and enabled |
+
+A token budget has precedence over either mode; only one of `effort`, `enabled`, or `max_tokens`
+is sent. A provider may translate or ignore a budget, so HTTP acceptance does not prove a hard
+ceiling. Keep it unset until provider usage supports an appropriate budget. Any scheduled
+`thinking: off` combined with a budget fails before the first model run, including an off
+advisor or validator inherited from repository configuration.
+
+For `enabled` mode, off omits the reasoning object. Default effort mode retains Pi's model-specific
+off control. Neither omission nor an off setting proves that a mandatory/default-on model stops
+internal reasoning. Non-reasoning model metadata and non-OpenRouter payloads remain unchanged.
+
+When a map or budget is configured, the extension observes every attempt using Pi's resolved
+model, including replacement models after failover. Default effort payloads are left untouched.
+With neither input configured, no reasoning extension is loaded. Logical-run and physical-attempt
+records include `reasoning` with `requestedThinking`, `piThinking`, `configuredMode`,
+`effectiveControl` (`off`, `named-effort`, `provider-default`, or `max-tokens`), optional `effort` or
+`maxTokens`, and `adapted`. These are request controls, never raw reasoning. Missing observation
+from a configured extension fails the run; older summaries without these inputs remain valid.
+
 ### Model
 
 | Input | Default | Examples |
 |---|---|---|
 | `provider` | `anthropic` | `deepseek`, `openrouter`, `openai`, `anthropic`, `google`, `groq`, `mistral`, `together`, `xai` |
 | `model` | _(provider default)_ | `deepseek-v4-pro`, `moonshotai/Kimi-K2.7-Code`, `Qwen/Qwen3.7-Max`, `claude-sonnet-4-6`, `claude-opus-4-8`, `gpt-5.5`, `gemini-3.1-pro-preview` |
-| `thinking` | `medium` | Portable pi levels: `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` |
+| `thinking` | `medium` | Requested thinking; enabled-mode models use provider defaults. Portable pi levels: `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` |
 | `system_prompt` | _(pi default)_ | Override pi's system prompt |
 | `max_turns` | `20` | Cap conversation turns |
 | `run_timeout_seconds` | `600` | Wall-clock timeout for each model run; keep the job timeout higher so elek can update the tracking comment |

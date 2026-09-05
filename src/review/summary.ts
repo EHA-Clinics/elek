@@ -8,6 +8,7 @@ import { uniqueFindingId, type ParsedReviewFinding } from "./findings.js";
 export type ReviewRunRole = "reviewer" | "validator-review" | "validator";
 
 export interface ReviewRunMetric {
+  reasoning?: PiRunResult["reasoning"];
   role: ReviewRunRole;
   lensId?: string;
   lensTitle?: string;
@@ -79,6 +80,7 @@ export interface ReviewRunMetric {
  * or why it was attempted.
  */
 export interface ReviewAttemptMetric {
+  reasoning?: PiRunResult["reasoning"];
   lensId: string;
   lensTitle?: string;
   role: ReviewRunRole;
@@ -170,6 +172,7 @@ export function metricFromPiRun(
     role,
     ...metadata,
     modelLabel: result.usage.modelLabel,
+    ...(result.reasoning ? { reasoning: result.reasoning } : {}),
     ...(result.failureClass ? { failureClass: result.failureClass } : {}),
     ...(result.providerHttpStatus !== undefined
       ? { providerHttpStatus: result.providerHttpStatus }

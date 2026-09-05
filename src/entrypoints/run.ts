@@ -48,6 +48,7 @@ import {
   fetchReviewComments,
 } from "../github/comments.js";
 import { runPi } from "../pi.js";
+import { validateReasoningSchedule } from "../openrouter-reasoning.js";
 import type { ProgressEvent } from "../pi.js";
 import { formatProgressComment, type ProgressState } from "../github/progress.js";
 import { spinnerHeader } from "../github/spinner.js";
@@ -524,6 +525,11 @@ async function run(): Promise<void> {
   }
 
   const useReviewPlan = reviewPlanSupport.enabled;
+  validateReasoningSchedule(inputs.reasoningMaxTokens, useReviewPlan ? [
+    inputs.thinking,
+    ...(reviewPlan.validatorReview ? [inputs.advisorThinking || inputs.validatorThinking || inputs.thinking] : []),
+    inputs.validatorThinking || inputs.thinking,
+  ] : [inputs.thinking]);
   trackingModelLabel = useReviewPlan ? reviewPlan.validator.label : modelLabel;
   activeModelLabel = trackingModelLabel;
   console.log(`[config] execution_strategy=${useReviewPlan ? reviewPlan.strategy : "solo"}`);
@@ -859,6 +865,7 @@ async function run(): Promise<void> {
     attempt: 1,
     assignedModel: activeModelLabel,
     actualModel: result.usage.modelLabel || activeModelLabel,
+    ...(result.reasoning ? { reasoning: result.reasoning } : {}),
     failover: false,
     conclusion: result.conclusion,
     ...(result.failureClass ? { failureClass: result.failureClass } : {}),

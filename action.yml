@@ -103,21 +103,20 @@ inputs:
       endpoints over a rolling five-minute window, while `quantizations` / `only` / `ignore` EXCLUDE
       them - keep `allow_fallbacks: true` unless you have a considered reason not to. (EHAC-2280)
     required: false
+  openrouter_model_reasoning_modes:
+    description: >-
+      JSON map of canonical OpenRouter model IDs to effort (default) or enabled (provider-default
+      reasoning). An optional openrouter/ prefix is normalized. Invalid or conflicting maps fail
+      before model execution. Example: {"xiaomi/mimo-v2.5-pro":"enabled"}.
+    required: false
+    default: ""
   reasoning_max_tokens:
     description: >-
-      Cap on reasoning tokens per model run, applied via pi's before_provider_request hook.
-      NO DEFAULT, and deliberately so: read the two caveats before setting it. (1) pi exposes no
-      reasoning.max_tokens config knob, so this is applied by an extension elek loads ONLY when
-      this input is set - unset means no extension is loaded at all. (2) pi's Usage still reports no
-      reasoning-token count, but the cap is no longer unverifiable: elek now records
-      native_tokens_reasoning per run in the coverage record, read from OpenRouter's generation
-      endpoint (observed live at 0 on DeepInfra and 10 on Novita for the same prompt). What does
-      not exist yet is a collected distribution - that field ships in this same release - so size a
-      cap from a few real council runs before setting this. Until you have, the often-quoted 32000
-      is NOT a measurement: it is ~10x the largest reasoning-token count seen for a model actually
-      in the council (deepseek-v4-flash at 3,170 on a ~79,000 char payload) and ~3.5x the largest
-      in the shared workflow's benchmark table (qwen3.7-plus at 9,000). Prefer your own numbers.
-      (EHAC-2280)
+      Optional OpenRouter reasoning token budget. Replaces effort/enabled with max_tokens;
+      never combines controls. Unsupported budgets may be translated or ignored by providers,
+      so request acceptance does not prove a hard ceiling. Measure provider-reported reasoning
+      tokens before setting a budget. Unset by default. Any scheduled off thinking plus a budget
+      fails preflight. The request extension is loaded when a mode map or budget is configured.
     required: false
   stall_timeout_seconds:
     description: >
@@ -371,6 +370,7 @@ runs:
         INPUT_RUN_TIMEOUT_SECONDS: ${{ inputs.run_timeout_seconds }}
         INPUT_JOB_TIMEOUT_MINUTES: ${{ inputs.job_timeout_minutes }}
         INPUT_OPENROUTER_PROVIDER_PREFERENCES: ${{ inputs.openrouter_provider_preferences }}
+        INPUT_OPENROUTER_MODEL_REASONING_MODES: ${{ inputs.openrouter_model_reasoning_modes }}
         INPUT_REASONING_MAX_TOKENS: ${{ inputs.reasoning_max_tokens }}
         INPUT_STALL_TIMEOUT_SECONDS: ${{ inputs.stall_timeout_seconds }}
         INPUT_TOOLS: ${{ inputs.tools }}

@@ -347,7 +347,7 @@ export async function runPi(
   console.log(`pi binary: ${piBin}`);
   const cliThinking = piThinkingLevel(inputs.thinking);
   console.log(
-    `Provider: ${inputs.provider}, Model: ${inputs.model || "default"}, Thinking: ${
+    `Provider: ${inputs.provider}, Model: ${inputs.model || "default"}, Requested thinking: ${
       cliThinking === inputs.thinking ? inputs.thinking : `${inputs.thinking} (pi ${cliThinking})`
     }`,
   );

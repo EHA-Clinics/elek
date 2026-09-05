@@ -106,7 +106,8 @@ inputs:
   openrouter_model_reasoning_modes:
     description: >-
       JSON map of canonical OpenRouter model IDs to effort (default) or enabled (provider-default
-      reasoning). An optional openrouter/ prefix is normalized. Invalid or conflicting maps fail
+      reasoning). Enabled mode also uses max_tokens for Pi's unchanged output limit.
+      An optional openrouter/ prefix is normalized. Invalid or conflicting maps fail
       before model execution. Example: {"xiaomi/mimo-v2.5-pro":"enabled"}.
     required: false
     default: ""

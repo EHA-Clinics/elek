@@ -63,13 +63,20 @@ export function buildReasoningPayload(
 ): Record<string, unknown> | undefined {
   validateReasoningSchedule(maxTokens, [options.thinking]);
   if (options.mode === "effort" && maxTokens === undefined) return undefined;
+  let base = payload;
+  // MiMo rejects Pi's OpenAI token-limit alias under require_parameters=true.
+  // Keep the output limit unchanged; it is separate from the reasoning budget.
+  if (options.mode === "enabled" && Object.hasOwn(payload, "max_completion_tokens")) {
+    const { max_completion_tokens, ...rest } = payload;
+    base = { ...rest, max_tokens: max_completion_tokens };
+  }
   if (piThinkingLevel(options.thinking) === "off") {
-    if (!Object.hasOwn(payload, "reasoning")) return undefined;
-    const { reasoning: _reasoning, ...rest } = payload;
+    if (!Object.hasOwn(base, "reasoning")) return base === payload ? undefined : base;
+    const { reasoning: _reasoning, ...rest } = base;
     return rest;
   }
-  const { effort: _effort, enabled: _enabled, max_tokens: _maxTokens, ...rest } = object(payload.reasoning);
-  return { ...payload, reasoning: { ...rest, ...(maxTokens === undefined ? { enabled: true } : { max_tokens: maxTokens }) } };
+  const { effort: _effort, enabled: _enabled, max_tokens: _maxTokens, ...rest } = object(base.reasoning);
+  return { ...base, reasoning: { ...rest, ...(maxTokens === undefined ? { enabled: true } : { max_tokens: maxTokens }) } };
 }
 
 export interface ReasoningRequestOptions {

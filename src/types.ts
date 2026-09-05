@@ -1,4 +1,5 @@
 /** Shared types for pi-actions-bot */
+import type { ReasoningModes, ReasoningTelemetry } from "./openrouter-reasoning.js";
 
 export interface ActionInputs {
   // Trigger
@@ -30,13 +31,9 @@ export interface ActionInputs {
    * which is exactly the behaviour before this input existed.
    */
   openRouterProviderPreferences?: Record<string, unknown>;
-  /**
-   * Cap on reasoning tokens per model run. Undefined — the shipped default — means
-   * no cap is sent and no extension is loaded. Whether such a cap binds IS now
-   * measurable, per run, via `nativeTokensReasoning` on `PiRunResult` below; what does
-   * not exist yet is a collected distribution to size one from, so this stays inert
-   * plumbing until a caller has that data and deliberately opts in.
-   */
+  /** Explicit OpenRouter capability policy; absent entries preserve Pi effort control. */
+  openRouterReasoningModes?: ReasoningModes;
+  /** Optional OpenRouter budget; replaces effort/enabled. Provider support determines enforcement. */
   reasoningMaxTokens?: number;
   /**
    * Stream-idle watchdog, in seconds. 0 disables it.
@@ -194,6 +191,8 @@ export interface PiStreamTelemetry {
 }
 
 export interface PiRunResult extends PiStreamTelemetry {
+  /** Request controls observed by the configured Pi extension, never raw reasoning. */
+  reasoning?: ReasoningTelemetry;
   conclusion: "success" | "failure";
   output: string;
   sessionId?: string;

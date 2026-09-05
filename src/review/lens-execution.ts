@@ -62,6 +62,7 @@ function attemptMetric(params: {
     actualModel: usedJob.model.label,
     failover: params.failover,
     conclusion: result.conclusion,
+    ...(result.reasoning ? { reasoning: result.reasoning } : {}),
     ...(result.failureClass ? { failureClass: result.failureClass } : {}),
     ...(result.providerHttpStatus !== undefined
       ? { providerHttpStatus: result.providerHttpStatus }

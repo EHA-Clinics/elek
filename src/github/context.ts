@@ -5,6 +5,7 @@
 import * as core from "@actions/core";
 import { readFileSync } from "fs";
 import type { GitHubEntityContext, ActionInputs } from "../types.js";
+import { parseReasoningModes } from "../openrouter-reasoning.js";
 import { parseOpenRouterProviderPreferences } from "../openrouter-routing.js";
 
 function parseBooleanInput(value: string, defaultValue: boolean): boolean {
@@ -186,6 +187,7 @@ export function parseInputs(): ActionInputs {
     openRouterProviderPreferences: parseOpenRouterProviderPreferences(
       core.getInput("openrouter_provider_preferences"),
     ),
+    openRouterReasoningModes: parseReasoningModes(core.getInput("openrouter_model_reasoning_modes")),
     reasoningMaxTokens: parseReasoningMaxTokensInput(core.getInput("reasoning_max_tokens")),
     stallTimeoutSeconds: parseStallTimeoutSecondsInput(core.getInput("stall_timeout_seconds")),
     tools: core.getInput("tools") || "",

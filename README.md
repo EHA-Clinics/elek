@@ -345,6 +345,10 @@ OpenRouter IDs; a leading `openrouter/` is normalized. Invalid JSON, non-object 
 IDs, duplicate keys, conflicting normalized keys, and modes other than `effort`/`enabled` fail
 before model execution. The map has no runtime catalog dependency.
 
+Enabled mode also sends Pi's output limit as top-level `max_tokens`, preserving its value.
+MiMo rejects the `max_completion_tokens` alias with `require_parameters: true`. This output
+limit is distinct from the optional nested reasoning budget below, including when thinking is off.
+
 | Input | Default | Behavior |
 |---|---|---|
 | `openrouter_model_reasoning_modes` | _(empty)_ | Explicit `effort`/`enabled` capability map |

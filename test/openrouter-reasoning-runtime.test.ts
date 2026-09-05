@@ -41,7 +41,9 @@ describe("pinned Pi reasoning extension under Node", () => {
       const agentDir = join(tmp, "agent"); mkdirSync(agentDir);
       writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: { openrouter: {
         baseUrl: `http://127.0.0.1:${address.port}/v1`, api: "openai-completions", apiKey: "synthetic-key",
-        models: [MIMO, PRO].map((id) => ({ id, reasoning: true, contextWindow: 32000, maxTokens: 1024,
+        // Exercise MiMo's actual bundled metadata, including its 131072-token limit.
+        modelOverrides: { [MIMO]: { compat: { openRouterRouting: ROUTING } } },
+        models: [PRO].map((id) => ({ id, reasoning: true, contextWindow: 32000, maxTokens: 1024,
           compat: { thinkingFormat: "openrouter", openRouterRouting: ROUTING } })),
       }, fixture: {
         baseUrl: `http://127.0.0.1:${address.port}/v1`, api: "openai-completions", apiKey: "synthetic-key",
@@ -59,7 +61,10 @@ describe("pinned Pi reasoning extension under Node", () => {
       expect(pro.reasoning).toMatchObject({ configuredMode: "effort", effectiveControl: "named-effort", effort: "high", adapted: false });
       expect(mimo.malformedLineCount).toBe(0);
       expect(requests.find((r) => r.model === MIMO)?.reasoning).toEqual({ enabled: true });
+      expect(requests.find((r) => r.model === MIMO)?.max_tokens).toBe(131072);
+      expect(requests.find((r) => r.model === MIMO)).not.toHaveProperty("max_completion_tokens");
       expect(requests.find((r) => r.model === PRO)?.reasoning).toEqual({ effort: "high" });
+      expect(requests.find((r) => r.model === PRO)?.max_completion_tokens).toBe(1024);
       for (const request of requests) { expect(request.provider).toEqual(ROUTING); expect(request.tools).toBeDefined(); }
       const failure = await runPi("fail-permanent", inputs, undefined, false, { promptName: "permanent" });
       expect(failure.failureClass).toBe("provider_permanent");

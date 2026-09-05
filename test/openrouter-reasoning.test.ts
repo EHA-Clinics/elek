@@ -46,6 +46,18 @@ describe("OpenRouter reasoning contract", () => {
     expect(payload.reasoning.effort).toBe("high");
   });
 
+  it("uses the supported output-token parameter for enabled models without changing the limit", () => {
+    const original = { ...payload, max_completion_tokens: 131072 };
+    for (const thinking of ["high", "off"]) {
+      const result = shapeReasoningRequest(original, { model: mimo, modes, thinking, requestedThinking: thinking });
+      expect(result.payload?.max_tokens).toBe(131072);
+      expect(result.payload).not.toHaveProperty("max_completion_tokens");
+      expect(result.payload?.reasoning).toEqual(thinking === "off" ? undefined : { exclude: true, enabled: true });
+    }
+    expect(original.max_completion_tokens).toBe(131072);
+    expect(shapeReasoningRequest(original, { model: mimo, modes: {}, thinking: "high", requestedThinking: "high" }).payload).toBeUndefined();
+  });
+
   it("uses one cap control in either mode", () => {
     for (const configuredModes of [{}, modes]) {
       const result = shapeReasoningRequest({ reasoning: { effort: "high", enabled: true, exclude: true } }, {

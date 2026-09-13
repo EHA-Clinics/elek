@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { createHash } from "crypto";
-import { createTrackingComment, updateTrackingComment } from "../src/github/comments";
+import { createTrackingComment, updateTrackingComment, createPRReview } from "../src/github/comments";
+import { evaluateCouncilPolicy } from "../src/review/council-policy";
 import type { GitHubEntityContext } from "../src/types";
 
 const context: GitHubEntityContext = {
@@ -304,5 +305,35 @@ describe("comment branding", () => {
     expect(updates).toHaveLength(1);
     expect(updates[0]).toMatchObject({ comment_id: 20 });
     expect(String(updates[0].body)).toContain("superseded by a newer run");
+  });
+});
+
+
+describe("degraded PR review", () => {
+  it("does not present a tolerated missing tests lens as analysis complete", async () => {
+    let body = "";
+    let event = "";
+    const octokit = {
+      rest: {
+        issues: { createComment: async () => ({}), updateComment: async () => ({}), listComments: async () => ({ data: [] }) },
+        pulls: {
+          createReview: async (params: any) => { body = params.body; event = params.event; return {}; },
+          listReviews: async () => ({ data: [] }), listReviewComments: async () => ({ data: [] }),
+        },
+      },
+    };
+    const policy = evaluateCouncilPolicy({ configuredMaxDegradedLenses: 1, runs: [
+      { role: "reviewer", lensId: "risk", conclusion: "success" },
+      { role: "reviewer", lensId: "tests", conclusion: "failure" },
+      { role: "validator", conclusion: "success" },
+    ] });
+    await createPRReview(octokit, context, "No findings.", "success", "private-model", policy);
+    expect(body).toContain("review incomplete");
+    expect(body).not.toContain("analysis complete");
+    expect(body).toContain("DEGRADED");
+    expect(body).toContain("1/2 reviewer lenses completed");
+    expect(body).toContain("tests");
+    expect(body).not.toContain("private-model");
+    expect(event).toBe("COMMENT");
   });
 });

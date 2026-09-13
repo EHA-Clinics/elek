@@ -2,6 +2,8 @@
  * GitHub comment management — create/update comments on PRs and issues.
  * Deduplicates by signature so the same comment is reused across pushes.
  */
+import type { CouncilPolicyResult } from "../review/council-policy.js";
+import { publicReviewCoverage } from "../review/public-coverage.js";
 import type { GitHubEntityContext } from "../types.js";
 import { extractFindingIds, stripFindingMarkers } from "../review/finding-markers.js";
 import { spinnerHeader } from "./spinner.js";
@@ -331,6 +333,7 @@ export async function createPRReview(
   output: string,
   conclusion: "success" | "failure",
   modelLabel: string,
+  councilPolicy?: CouncilPolicyResult,
 ): Promise<void> {
   await withGitHubRetry(
     () =>
@@ -338,7 +341,7 @@ export async function createPRReview(
         owner: context.repo.owner,
         repo: context.repo.repo,
         pull_number: context.entityNumber,
-        body: formatReviewBody(output, conclusion, context, modelLabel),
+        body: formatReviewBody(output, conclusion, context, modelLabel, councilPolicy),
         event: "COMMENT",
       }),
     { label: "createPRReview" },
@@ -405,15 +408,15 @@ function formatReviewBody(
   conclusion: "success" | "failure",
   context: GitHubEntityContext,
   modelLabel: string,
+  councilPolicy?: CouncilPolicyResult,
 ): string {
   const runLink = jobRunLink(context);
+  const review = publicReviewCoverage(output, conclusion, councilPolicy);
 
   return [
-    conclusion === "success"
-      ? spinnerHeader(modelLabel, "analysis complete")
-      : spinnerHeader(modelLabel, "encountered an issue"),
+    spinnerHeader(modelLabel, review.status),
     "",
-    output,
+    review.body,
     "",
     "---",
     `*${runLink}*`,

@@ -51,6 +51,7 @@ import { runPi } from "../pi.js";
 import { validateReasoningSchedule } from "../openrouter-reasoning.js";
 import type { ProgressEvent } from "../pi.js";
 import { formatProgressComment, type ProgressState } from "../github/progress.js";
+import { publicReviewCoverage } from "../review/public-coverage.js";
 import { spinnerHeader } from "../github/spinner.js";
 import type { PiRunResult } from "../types.js";
 import {
@@ -839,9 +840,10 @@ async function run(): Promise<void> {
     ]),
     publicModelLabel,
   });
-  const publicOutput = publicReview.body;
   const publicConclusion =
     result.conclusion === "success" && publicReview.usable ? "success" : "failure";
+  const publicCoverage = publicReviewCoverage(publicReview.body, publicConclusion, councilPolicy);
+  const publicOutput = publicCoverage.body;
   if (publicReview.filtered) {
     console.warn(
       `[review-output] filtered internal delivery text from public review ` +
@@ -908,9 +910,7 @@ async function run(): Promise<void> {
   let reviewBody = "";
   if (commentId) {
     reviewBody = [
-      publicConclusion === "success"
-        ? spinnerHeader(activeModelLabel, "analysis complete")
-        : spinnerHeader(activeModelLabel, "encountered an issue"),
+      spinnerHeader(activeModelLabel, publicCoverage.status),
       "",
       truncate(publicOutput),
       ...(inputs.showCost ? ["", `_${costLine}_`] : []),
@@ -977,9 +977,9 @@ async function run(): Promise<void> {
   if (context.isPR && !commentId) {
     try {
       const reviewOutput = inputs.showCost
-        ? `${truncate(publicOutput)}\n\n_${costLine}_`
-        : truncate(publicOutput);
-      await createPRReview(octokit, context, reviewOutput, publicConclusion, activeModelLabel);
+        ? `${truncate(publicReview.body)}\n\n_${costLine}_`
+        : truncate(publicReview.body);
+      await createPRReview(octokit, context, reviewOutput, publicConclusion, activeModelLabel, councilPolicy);
     } catch (err) {
       console.warn("Could not create PR review:", err);
     }
@@ -992,9 +992,7 @@ async function run(): Promise<void> {
         octokit,
         context,
         [
-          publicConclusion === "success"
-            ? spinnerHeader(activeModelLabel, "analysis complete")
-            : spinnerHeader(activeModelLabel, "encountered an issue"),
+          spinnerHeader(activeModelLabel, publicCoverage.status),
           "",
           truncate(publicOutput),
           ...(inputs.showCost ? ["", `_${costLine}_`] : []),

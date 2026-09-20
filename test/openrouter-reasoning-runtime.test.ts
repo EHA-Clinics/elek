@@ -67,7 +67,7 @@ describe("pinned Pi reasoning extension under Node", () => {
       expect(requests.find((r) => r.model === PRO)?.max_completion_tokens).toBe(1024);
       for (const request of requests) { expect(request.provider).toEqual(ROUTING); expect(request.tools).toBeDefined(); }
       const failure = await runPi("fail-permanent", inputs, undefined, false, { promptName: "permanent" });
-      expect(failure.failureClass).toBe("provider_permanent");
+      expect(failure.failureClass).toBe("provider_unavailable"); // synthetic 404: this model, not the account
       expect(metricFromPiRun(failure, "reviewer").reasoning).toEqual(mimo.reasoning);
       const models: ModelSpec[] = [MIMO, PRO].map((id) => ({ provider: "openrouter", model: `openrouter/${id}`, label: `openrouter/${id}` }));
       const job: ReviewJob = { model: models[0], lens: { id: "design", title: "Design", focus: "design" } };

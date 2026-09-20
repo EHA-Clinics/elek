@@ -345,14 +345,29 @@ OpenRouter IDs; a leading `openrouter/` is normalized. Invalid JSON, non-object 
 IDs, duplicate keys, conflicting normalized keys, and modes other than `effort`/`enabled` fail
 before model execution. The map has no runtime catalog dependency.
 
+A map entry may carry a **per-model reasoning budget**:
+
+```yaml
+openrouter_model_reasoning_modes: '{"xiaomi/mimo-v2.5-pro":{"mode":"enabled","max_tokens":12000}}'
+```
+
+That model's request carries `reasoning: {max_tokens: 12000}` (control `max-tokens` in the
+telemetry) while every other model keeps its named effort. This is the way to bound one
+binary-reasoning model — MiMo runs provider-default, unbounded, under `enabled` — because the
+global `reasoning_max_tokens` below replaces **every** model's control at once and would knock the
+named-effort lenses off `effort`. Exactly the keys `mode` and `max_tokens` are accepted; an extra or
+misspelt key fails before execution rather than silently meaning "no budget". A per-model budget
+wins over the global one for that model. Size any budget from measured `native_tokens_reasoning`
+in the coverage record, never from benchmark prose.
+
 Enabled mode also sends Pi's output limit as top-level `max_tokens`, preserving its value.
 MiMo rejects the `max_completion_tokens` alias with `require_parameters: true`. This output
 limit is distinct from the optional nested reasoning budget below, including when thinking is off.
 
 | Input | Default | Behavior |
 |---|---|---|
-| `openrouter_model_reasoning_modes` | _(empty)_ | Explicit `effort`/`enabled` capability map |
-| `reasoning_max_tokens` | _(unset)_ | OpenRouter token budget replacing both effort and enabled |
+| `openrouter_model_reasoning_modes` | _(empty)_ | Per-model control: `effort`, `enabled`, or `{"mode": …, "max_tokens": N}` to cap that model alone |
+| `reasoning_max_tokens` | _(unset)_ | GLOBAL token budget replacing both effort and enabled for every model |
 
 A token budget has precedence over either mode; only one of `effort`, `enabled`, or `max_tokens`
 is sent. A provider may translate or ignore a budget, so HTTP acceptance does not prove a hard

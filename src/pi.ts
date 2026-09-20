@@ -25,7 +25,7 @@ import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { writeRoutingConfig } from "./openrouter-routing.js";
 import { lookupGenerationRecord, isGenerationLookupApplicable } from "./openrouter-generation.js";
-import {
+import { reasoningBudgets,
   REASONING_MAX_TOKENS_ENV, REASONING_MODES_ENV, REASONING_THINKING_ENV, REASONING_TELEMETRY_PREFIX, REASONING_NOT_APPLICABLE,
   parseReasoningTelemetry, piThinkingLevel, validateReasoningSchedule,
   type ReasoningTelemetry,
@@ -128,8 +128,20 @@ function findPiBinary(): string {
  */
 const TRANSIENT_PROVIDER_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
 
-/** HTTP statuses that mean the request will fail identically next time. */
-const PERMANENT_PROVIDER_STATUSES = new Set([400, 401, 402, 403, 404, 405, 413, 422]);
+/**
+ * HTTP 404 from OpenRouter means THIS MODEL is not reachable for this account: the workspace
+ * guardrail denies it ("Model blocked by guardrail", `model-ignored-by-guardrail`) or no
+ * endpoint satisfies the routing policy ("No endpoints found"). Retrying the SAME model
+ * reproduces it exactly — which is why it used to sit in the permanent set — but unlike
+ * 401/402/403 it is a fact about one model, not about the request or the account, so a
+ * DIFFERENT model is the remedy by definition. Measured 2026-09-19: the retired
+ * `deepseek/deepseek-v4-pro` alias 404'd on every request across two repositories and took
+ * the Risk lens and the validator down with it, while three other models were fine.
+ */
+const UNAVAILABLE_PROVIDER_STATUSES = new Set([404]);
+
+/** HTTP statuses that mean the request will fail identically next time, on ANY model. */
+const PERMANENT_PROVIDER_STATUSES = new Set([400, 401, 402, 403, 405, 413, 422]);
 
 /**
  * Map a STRUCTURED provider status onto a failure class.
@@ -144,6 +156,7 @@ const PERMANENT_PROVIDER_STATUSES = new Set([400, 401, 402, 403, 404, 405, 413, 
 export function classifyProviderStatus(status: unknown): PiFailureClass | undefined {
   if (typeof status !== "number" || !Number.isInteger(status)) return undefined;
   if (TRANSIENT_PROVIDER_STATUSES.has(status)) return "provider_transient";
+  if (UNAVAILABLE_PROVIDER_STATUSES.has(status)) return "provider_unavailable";
   if (PERMANENT_PROVIDER_STATUSES.has(status)) return "provider_permanent";
   if (status >= 500 && status <= 599) return "provider_transient";
   if (status >= 400 && status <= 499) return "provider_permanent";
@@ -248,7 +261,7 @@ export function providerErrorFromMessage(message: unknown): ProviderErrorEnvelop
  * relabelled by whatever happened afterwards:
  *
  *  1. elek killed the child          -> the kill reason (stall | timeout | max_turns)
- *  2. a structured provider status   -> provider_transient | provider_permanent
+ *  2. a structured provider status   -> provider_transient | provider_unavailable | provider_permanent
  *  3. non-zero / signalled exit      -> process_error
  *  4. clean exit, nothing usable     -> invalid_output
  *  5. clean exit, output, error stop -> unknown  (never retried)
@@ -300,6 +313,9 @@ export async function runPi(
   options: { promptName?: string } = {},
 ): Promise<PiRunResult> {
   validateReasoningSchedule(inputs.reasoningMaxTokens, [inputs.thinking]);
+  for (const budget of reasoningBudgets(inputs.openRouterReasoningModes ?? {})) {
+    validateReasoningSchedule(budget, [inputs.thinking], "openrouter_model_reasoning_modes");
+  }
   const tmpDir = process.env.RUNNER_TEMP || "/tmp";
   const promptDir = join(tmpDir, "pi-prompts");
   if (!existsSync(promptDir)) {

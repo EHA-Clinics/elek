@@ -323,7 +323,19 @@ describe("classifyProviderStatus", () => {
   it("maps auth and configuration statuses to a permanent class", () => {
     expect(classifyProviderStatus(401)).toBe("provider_permanent");
     expect(classifyProviderStatus(403)).toBe("provider_permanent");
-    expect(classifyProviderStatus(404)).toBe("provider_permanent");
+    expect(classifyProviderStatus(405)).toBe("provider_permanent");
+    expect(classifyProviderStatus(413)).toBe("provider_permanent");
+    expect(classifyProviderStatus(422)).toBe("provider_permanent");
+  });
+
+  it("classes 404 as provider_unavailable — this MODEL is unreachable, a different one is the remedy", () => {
+    // The guardrail-denial shape measured on 2026-09-19: the retired deepseek-v4-pro alias
+    // 404'd on every request while three other models on the same roster were fine.
+    expect(classifyProviderStatus(404)).toBe("provider_unavailable");
+    // 401/402/403 are about the ACCOUNT or the request and stay permanent — retrying those on
+    // another model would spend a second full budget confirming a certainty.
+    expect(classifyProviderStatus(401)).toBe("provider_permanent");
+    expect(classifyProviderStatus(402)).toBe("provider_permanent");
   });
 
   it("refuses to classify anything that is not a structured integer status", () => {
@@ -765,7 +777,9 @@ describe("runPi stream-idle watchdog", () => {
       );
 
       expect(result.conclusion).toBe("failure");
-      expect(result.failureClass).toBe("provider_permanent");
+      // THE production shape of 2026-09-19: the guardrail denies this model and only this
+      // model. It is `provider_unavailable`, the one class whose remedy is a different model.
+      expect(result.failureClass).toBe("provider_unavailable");
       expect(result.providerHttpStatus).toBe(404);
       expect(result.providerIneligibilityReasons).toEqual(["model-ignored-by-guardrail"]);
     } finally {

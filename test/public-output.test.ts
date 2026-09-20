@@ -285,4 +285,48 @@ describe("public review output filtering", () => {
     expect(result.body).not.toContain("deepseek/deepseek-v4-pro");
     expect(result.body).not.toContain("deepseek-v4-pro");
   });
+
+  it("never re-substitutes inside its own replacement — the doubled-label defect of 2026-09-20", () => {
+    // Production shape: the public label is one internal label (the primary model), the terms
+    // include another (the validator) AND the primary model's own tail segment. The old
+    // sequential reduce turned every `openrouter/deepseek/deepseek-v4.1-flash` into
+    // `openrouter/deepseek/openrouter/deepseek/deepseek-v4.1-flash`.
+    const result = preparePublicReviewOutput(
+      [
+        "## Review Summary",
+        "Lenses: tests (openrouter/deepseek/deepseek-v4.1-flash), validator (openrouter/deepseek/deepseek-v4-pro-0813).",
+        "- Severity: important",
+        "- Path: `x.ts`",
+      ].join("\n"),
+      "success",
+      {
+        internalModelLabels: [
+          "openrouter/deepseek/deepseek-v4.1-flash", "deepseek-v4.1-flash",
+          "openrouter/deepseek/deepseek-v4-pro-0813", "deepseek-v4-pro-0813",
+        ],
+        publicModelLabel: "openrouter/deepseek/deepseek-v4.1-flash",
+      },
+    );
+    expect(result.body).not.toContain("openrouter/deepseek/openrouter/");
+    expect(result.body).not.toContain("deepseek-v4-pro-0813");
+    expect(result.body.match(/openrouter\/deepseek\/deepseek-v4\.1-flash/g)).toHaveLength(2);
+  });
+
+  it("leaves text untouched when no public label is configured", () => {
+    const text = ["## Review Summary", "tests (openrouter/deepseek/deepseek-v4.1-flash)", "- Severity: important"].join("\n");
+    const result = preparePublicReviewOutput(text, "success", {
+      internalModelLabels: ["openrouter/deepseek/deepseek-v4.1-flash", "deepseek-v4.1-flash"],
+      publicModelLabel: undefined,
+    });
+    expect(result.body).toContain("tests (openrouter/deepseek/deepseek-v4.1-flash)");
+  });
+
+  it("does not stutter when the replacement is itself one of the terms' prefixes", () => {
+    const result = preparePublicReviewOutput(
+      ["## Review Summary", "elek review by elek-internal and elek-internal-v2.", "- Severity: minor"].join("\n"),
+      "success",
+      { internalModelLabels: ["elek-internal-v2", "elek-internal"], publicModelLabel: "elek" },
+    );
+    expect(result.body).toContain("elek review by elek and elek.");
+  });
 });

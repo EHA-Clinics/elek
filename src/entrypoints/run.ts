@@ -48,7 +48,7 @@ import {
   fetchReviewComments,
 } from "../github/comments.js";
 import { runPi } from "../pi.js";
-import { validateReasoningSchedule } from "../openrouter-reasoning.js";
+import { reasoningBudgets, validateReasoningSchedule } from "../openrouter-reasoning.js";
 import type { ProgressEvent } from "../pi.js";
 import { formatProgressComment, type ProgressState } from "../github/progress.js";
 import { publicReviewCoverage } from "../review/public-coverage.js";
@@ -86,7 +86,7 @@ import {
 import { createSummaryFinalizer, type SummaryFinalizer } from "../review/summary-finalizer.js";
 import { parseReviewFindings } from "../review/findings.js";
 import { preparePublicReviewOutput } from "../review/public-output.js";
-import { modelLabelRedactionTerms, publicModelLabelFor } from "../review/public-label.js";
+import { configuredPublicModelLabel, modelLabelRedactionTerms, publicModelLabelFor } from "../review/public-label.js";
 import { inlineReviewBufferFromFindings } from "../review/inline-fallback.js";
 import { sanitize } from "../mcp/handlers.js";
 import type { PostSummary } from "./post-buffered.js";
@@ -293,7 +293,11 @@ async function run(): Promise<void> {
 
   // ── Phase 2: Setup ───────────────────────────────────────────────────
   const modelLabel = modelLabelFor(inputs);
-  const publicModelLabel = publicModelLabelFor(modelLabel);
+  // The public label names the model that WRITES the public output. In council mode that is
+  // the validator, which is not known until the review plan resolves below, so this is
+  // re-derived from `trackingModelLabel` at both points where that changes. Deriving it once
+  // from the primary `model` input labelled every council synthesis as the Tests lens's model.
+  let publicModelLabel = publicModelLabelFor(modelLabel);
   const runId = process.env.GITHUB_RUN_ID || "?";
   const jobRunLink = `https://github.com/${context.repo.fullName}/actions/runs/${runId}`;
 
@@ -324,6 +328,7 @@ async function run(): Promise<void> {
   if (reviewPlanSupport.warning) console.warn(reviewPlanSupport.warning);
 
   let trackingModelLabel = reviewPlanSupport.enabled ? reviewPlan.validator.label : modelLabel;
+  publicModelLabel = publicModelLabelFor(trackingModelLabel);
 
   // Determine base branch
   const baseBranch =
@@ -526,13 +531,20 @@ async function run(): Promise<void> {
   }
 
   const useReviewPlan = reviewPlanSupport.enabled;
-  validateReasoningSchedule(inputs.reasoningMaxTokens, useReviewPlan ? [
+  const scheduledThinking = useReviewPlan ? [
     inputs.thinking,
     ...(reviewPlan.validatorReview ? [inputs.advisorThinking || inputs.validatorThinking || inputs.thinking] : []),
     inputs.validatorThinking || inputs.thinking,
-  ] : [inputs.thinking]);
+  ] : [inputs.thinking];
+  validateReasoningSchedule(inputs.reasoningMaxTokens, scheduledThinking);
+  // A per-model budget in the mode map is a budget too: the same "no cap beside off thinking"
+  // rule applies to it, and it must fail here, before any model runs, not inside the extension.
+  for (const budget of reasoningBudgets(inputs.openRouterReasoningModes ?? {})) {
+    validateReasoningSchedule(budget, scheduledThinking, "openrouter_model_reasoning_modes");
+  }
   trackingModelLabel = useReviewPlan ? reviewPlan.validator.label : modelLabel;
   activeModelLabel = trackingModelLabel;
+  publicModelLabel = publicModelLabelFor(trackingModelLabel);
   console.log(`[config] execution_strategy=${useReviewPlan ? reviewPlan.strategy : "solo"}`);
 
   if (inputs.stickyComment) {
@@ -838,7 +850,11 @@ async function run(): Promise<void> {
       trackingModelLabel,
       activeModelLabel,
     ]),
-    publicModelLabel,
+    // Redaction is a NO-OP unless an operator configured a public label. With none configured
+    // there is nothing to hide, and rewriting internal labels to ANOTHER internal label only
+    // mis-attributes the review — measured 2026-09-20: every public council comment named the
+    // validator as the Tests lens's model, doubled.
+    publicModelLabel: configuredPublicModelLabel(),
   });
   const publicConclusion =
     result.conclusion === "success" && publicReview.usable ? "success" : "failure";

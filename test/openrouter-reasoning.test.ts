@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { parseInputs } from "../src/github/context";
 import {
   parseReasoningModes, shapeReasoningRequest, validateReasoningSchedule, parseReasoningTelemetry,
+  resolveReasoningControl, reasoningBudgets,
 } from "../src/openrouter-reasoning";
 
 const mimo = { id: "xiaomi/mimo-v2.5-pro", provider: "openrouter", reasoning: true };
@@ -31,6 +32,51 @@ describe("OpenRouter reasoning contract", () => {
     '{"a/../b":"enabled"}', '{"__proto__":"enabled"}', '{"a/b":"effort","a/b":"enabled"}'])
   ("rejects malformed or ambiguous map %s before execution", (raw) => {
     expect(() => parseReasoningModes(raw)).toThrow(/openrouter_model_reasoning_modes/);
+  });
+
+  it("accepts a per-model budget beside the mode, in canonical form", () => {
+    const budgeted = parseReasoningModes('{"openrouter/xiaomi/mimo-v2.5-pro":{"mode":"enabled","max_tokens":12000}}');
+    expect(budgeted).toEqual({ [mimo.id]: { mode: "enabled", max_tokens: 12000 } });
+    expect(resolveReasoningControl(budgeted, "openrouter/xiaomi/mimo-v2.5-pro")).toEqual({ mode: "enabled", maxTokens: 12000 });
+    expect(resolveReasoningControl(budgeted, "z-ai/glm-5.3-flash")).toEqual({ mode: "effort" });
+    expect(reasoningBudgets(budgeted)).toEqual([12000]);
+    expect(reasoningBudgets(modes)).toEqual([]);
+    // Same key spelled with and without the prefix, same config: not a conflict.
+    expect(parseReasoningModes('{"xiaomi/mimo-v2.5-pro":{"mode":"enabled","max_tokens":1},"openrouter/xiaomi/mimo-v2.5-pro":{"mode":"enabled","max_tokens":1}}'))
+      .toEqual({ [mimo.id]: { mode: "enabled", max_tokens: 1 } });
+  });
+
+  it.each(['{"a/b":{"mode":"enabled"}}', '{"a/b":{"max_tokens":10}}', '{"a/b":{"mode":"enabled","max_tokens":0}}',
+    '{"a/b":{"mode":"enabled","max_tokens":-5}}', '{"a/b":{"mode":"enabled","max_tokens":1.5}}',
+    '{"a/b":{"mode":"enabled","max_tokens":"10"}}', '{"a/b":{"mode":"enabled","max_token":10}}',
+    '{"a/b":{"mode":"enabled","max_tokens":10,"extra":1}}', '{"a/b":{"mode":"high","max_tokens":10}}',
+    '{"a/b":{"mode":"enabled","max_tokens":10},"openrouter/a/b":{"mode":"enabled","max_tokens":20}}',
+    '{"a/b":"enabled","openrouter/a/b":{"mode":"enabled","max_tokens":20}}'])
+  ("rejects a malformed or conflicting per-model budget %s", (raw) => {
+    expect(() => parseReasoningModes(raw)).toThrow(/openrouter_model_reasoning_modes/);
+  });
+
+  it("caps ONLY the budgeted model and leaves its neighbours on named effort", () => {
+    const glm = { id: "z-ai/glm-5.3-flash", provider: "openrouter", reasoning: true };
+    const budgeted = parseReasoningModes(JSON.stringify({ [mimo.id]: { mode: "enabled", max_tokens: 12000 } }));
+    const results = [mimo, glm].map((model) =>
+      shapeReasoningRequest(payload, { model, modes: budgeted, thinking: "high", requestedThinking: "high" }));
+    expect(results[0].reasoning.effectiveControl).toBe("max-tokens");
+    expect(results[0].reasoning.maxTokens).toBe(12000);
+    expect(results[0].reasoning.configuredMode).toBe("enabled");
+    expect(results[0].payload?.reasoning).toEqual({ exclude: true, max_tokens: 12000 });
+    expect(results[1].reasoning.effectiveControl).toBe("named-effort");
+    expect(results[1].reasoning.effort).toBe("high");
+    expect(results[1].payload).toBeUndefined();
+  });
+
+  it("lets a per-model budget override the global one, and the global one still applies elsewhere", () => {
+    const glm = { id: "z-ai/glm-5.3-flash", provider: "openrouter", reasoning: true };
+    const budgeted = parseReasoningModes(JSON.stringify({ [mimo.id]: { mode: "enabled", max_tokens: 12000 } }));
+    const forMimo = shapeReasoningRequest(payload, { model: mimo, modes: budgeted, thinking: "high", requestedThinking: "high", maxTokens: 500 });
+    const forGlm = shapeReasoningRequest(payload, { model: glm, modes: budgeted, thinking: "high", requestedThinking: "high", maxTokens: 500 });
+    expect(forMimo.reasoning.maxTokens).toBe(12000);
+    expect(forGlm.reasoning.maxTokens).toBe(500);
   });
 
   it("keeps unconfigured effort payload identity and reports the actual effort", () => {

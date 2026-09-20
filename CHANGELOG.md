@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Public review output no longer corrupts model labels. `redactInternalModelLabels`
+  applied its terms sequentially, so a term applied after another had been
+  substituted matched inside the fresh substitution, and a term that was a
+  substring of the replacement matched inside the replacement — every public
+  council comment named its model `openrouter/deepseek/openrouter/deepseek/…`
+  (measured 2026-09-20). Redaction is now one alternation in one pass, and it is
+  a no-op unless `ELEK_PUBLIC_MODEL_LABEL` is configured: with none configured
+  there is nothing to hide, and rewriting internal labels to another internal
+  label only mis-attributed the synthesis.
+- In council mode the public model label is the VALIDATOR's — the model that
+  writes the synthesis — not the primary `model` input, which is a reviewer lens.
+
+### Added
+
+- Failure class `provider_unavailable` (HTTP 404), split out of
+  `provider_permanent`. A 404 says THIS model is unreachable for the account
+  (guardrail denial, empty endpoint pool); the retry policy moves it to the next
+  distinct model, where 401/402/403 still never retry. Measured: the retired
+  `deepseek/deepseek-v4-pro` alias 404'd on every request and breached the
+  council on a fault three other models did not share.
+- Per-model reasoning budgets in `openrouter_model_reasoning_modes`:
+  `{"mode": effort|enabled, "max_tokens": N}` caps that model alone, so a
+  binary-reasoning model can be bounded while its neighbours keep named effort.
+  A per-model budget wins over the global `reasoning_max_tokens`, is validated
+  against the thinking schedule before any model runs, and fails closed on any
+  extra or misspelt key.
+
 ### Changed
 
 - Update pi coding agent to 0.83.0 for native Together metadata for Kimi K3

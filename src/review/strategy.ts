@@ -76,6 +76,12 @@ export const MAX_LENS_ATTEMPTS = 2;
  * and the next request very likely succeeds, while moving to another model would
  * change the review for no reason.
  *
+ * `provider_unavailable` (HTTP 404) moves to a distinct model: the status says THIS model is
+ * not reachable for this account — a guardrail denial or an empty endpoint pool — which is
+ * exactly the case where another model is the remedy and the same one never is. It was split
+ * out of `provider_permanent` after the retired `deepseek/deepseek-v4-pro` alias 404'd on every
+ * request (2026-09-19) and the council breached on a fault three other models did not share.
+ *
  * `provider_permanent`, `process_error` and `unknown` never retry. `unknown` is
  * the fail-closed default for anything elek could not classify from structured
  * state, and it must stay that way: retrying on a class we could not establish
@@ -114,6 +120,7 @@ export const FAILURE_RETRY_POLICY: Readonly<
   max_turns: { retry: true, target: "next-distinct-model" },
   invalid_output: { retry: true, target: "next-distinct-model" },
   provider_transient: { retry: true, target: "same-model" },
+  provider_unavailable: { retry: true, target: "next-distinct-model" },
   provider_permanent: { retry: false, target: "same-model" },
   process_error: { retry: false, target: "same-model" },
   unknown: { retry: false, target: "same-model" },

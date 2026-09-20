@@ -718,6 +718,21 @@ describe("resolveLensRetry", () => {
     }
   });
 
+  it("moves an UNAVAILABLE model (404) to the next distinct model — the one class where that is the remedy by definition", () => {
+    const decision = resolveLensRetry({ ...base, failureClass: "provider_unavailable" });
+    expect(decision.retry).toBe(true);
+    expect(decision.failover).toBe(true);
+    expect(decision.model!.label).toBe(MIMO.label);
+    // PAIRED DIRECTION: the rest of the permanent family stays put. If 401 ever moves models
+    // too, the split has been widened into the retry-everything policy this table replaced.
+    expect(resolveLensRetry({ ...base, failureClass: "provider_permanent" }).retry).toBe(false);
+  });
+
+  it("fails closed for an unavailable model on a single-model roster — nothing else to move to", () => {
+    const decision = resolveLensRetry({ ...base, failureClass: "provider_unavailable", roster: [PRO] });
+    expect(decision.retry).toBe(false);
+  });
+
   it("retries a transient provider fault on the SAME model", () => {
     const decision = resolveLensRetry({ ...base, failureClass: "provider_transient" });
     expect(decision.retry).toBe(true);
@@ -787,7 +802,7 @@ describe("resolveLensRetry", () => {
   it("keeps the retry matrix TOTAL over the failure taxonomy", () => {
     // A new failure class that nobody adds a policy row for would otherwise fall
     // through to whatever `undefined` happens to mean at the call site.
-    const classes = ["stall", "timeout", "max_turns", "invalid_output", "provider_transient", "provider_permanent", "process_error", "unknown"];
+    const classes = ["stall", "timeout", "max_turns", "invalid_output", "provider_transient", "provider_unavailable", "provider_permanent", "process_error", "unknown"];
     expect(Object.keys(FAILURE_RETRY_POLICY).sort()).toEqual(classes.sort());
   });
 

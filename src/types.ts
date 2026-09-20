@@ -150,6 +150,9 @@ export interface GitHubEntityContext {
  * - `invalid_output`     pi exited cleanly but produced nothing usable.
  * - `provider_transient` a structured provider status that is worth one retry
  *                        on the SAME model (429, 5xx, and similar).
+ * - `provider_unavailable` HTTP 404: the MODEL is not reachable for this account — the
+ *   workspace guardrail denies it, or no endpoint satisfies the routing policy. A fact about
+ *   one model, not about the request, so a DIFFERENT model is the remedy by definition
  * - `provider_permanent` a structured provider status that a retry cannot fix
  *                        (authentication, authorization, configuration).
  * - `process_error`      the child process itself failed (spawn error, or a
@@ -162,6 +165,7 @@ export type PiFailureClass =
   | "max_turns"
   | "invalid_output"
   | "provider_transient"
+  | "provider_unavailable"
   | "provider_permanent"
   | "process_error"
   | "unknown";

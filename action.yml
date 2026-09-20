@@ -105,10 +105,14 @@ inputs:
     required: false
   openrouter_model_reasoning_modes:
     description: >-
-      JSON map of canonical OpenRouter model IDs to effort (default) or enabled (provider-default
-      reasoning). Enabled mode also uses max_tokens for Pi's unchanged output limit.
-      An optional openrouter/ prefix is normalized. Invalid or conflicting maps fail
-      before model execution. Example: {"xiaomi/mimo-v2.5-pro":"enabled"}.
+      JSON map of canonical OpenRouter model IDs to effort (default), enabled (provider-default
+      reasoning), or {"mode": effort|enabled, "max_tokens": N} to cap THAT model's reasoning
+      tokens without touching its neighbours — which the global reasoning_max_tokens cannot do,
+      because it replaces every model's control at once. A per-model budget wins over the global
+      one. Size a budget from measured native_tokens_reasoning, never from benchmark prose.
+      Enabled mode also uses max_tokens for Pi's unchanged output limit. An optional openrouter/
+      prefix is normalized. Invalid, conflicting, or extra-keyed entries fail before model
+      execution. Example: {"xiaomi/mimo-v2.5-pro":{"mode":"enabled","max_tokens":12000}}.
     required: false
     default: ""
   reasoning_max_tokens:

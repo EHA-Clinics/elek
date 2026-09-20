@@ -174,14 +174,16 @@ function redactInternalModelLabels(
 ): string {
   const replacement = publicModelLabel?.trim();
   if (!text || !replacement) return text;
-  return internalModelLabels
-    .map((label) => label.trim())
-    .filter((label) => label && label !== replacement)
-    .sort((a, b) => b.length - a.length)
-    .reduce(
-      (current, label) => current.replace(new RegExp(escapeRegExp(label), "g"), replacement),
-      text,
-    );
+  // ONE alternation, ONE pass, longest term first. The previous sequential reduce corrupted its
+  // own output: a term applied after another had been substituted matched INSIDE the fresh
+  // substitution, and a term that was a substring of the replacement matched inside the
+  // replacement itself. Both fired in production on 2026-09-20 and rendered every public
+  // council comment's model as `openrouter/deepseek/openrouter/deepseek/deepseek-v4.1-flash`.
+  const terms = [...new Set(
+    internalModelLabels.map((label) => label.trim()).filter((label) => label && !replacement.includes(label)),
+  )].sort((a, b) => b.length - a.length);
+  if (terms.length === 0) return text;
+  return text.replace(new RegExp(terms.map(escapeRegExp).join("|"), "g"), replacement);
 }
 
 function escapeRegExp(value: string): string {

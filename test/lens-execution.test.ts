@@ -198,7 +198,7 @@ describe("executeLensWithRetry", () => {
     expect(out.retried).toBe(false);
   });
 
-  it("does not retry the validator-review lane", async () => {
+  it("does not retry the validator-review lane on a stall — only 404 moves it", async () => {
     const rec = recorder([fail(PRO.label, "stall")]);
     const out = await executeLensWithRetry({
       job: job(PRO, "validator-review"),
@@ -209,6 +209,44 @@ describe("executeLensWithRetry", () => {
     expect(rec.seen).toHaveLength(1);
     expect(out.retried).toBe(false);
     expect(out.attemptMetrics[0].role).toBe("validator-review");
+  });
+
+  it("fails the validator-review lane over to a distinct reviewer model on provider_unavailable (EHAC-2833)", async () => {
+    const rec = recorder([fail(PRO.label, "provider_unavailable"), piResult({ modelLabel: MIMO.label })]);
+    const out = await executeLensWithRetry({
+      job: job(PRO, "validator-review"),
+      roster: ROSTER,
+      deps: { runAttempt: rec.runAttempt },
+    });
+
+    expect(rec.seen.map((s) => s.model)).toEqual([PRO.label, MIMO.label]);
+    expect(out.retried).toBe(true);
+    expect(out.failoverUsed).toBe(true);
+    expect(out.lensResult.conclusion).toBe("success");
+    // The independence trade must stay VISIBLE in the record: attempt 1 keeps its
+    // original assignment; the failover attempt carries assigned != actual so the
+    // streak census can show the audit ran on a reviewer model.
+    expect(out.attemptMetrics).toHaveLength(2);
+    expect(out.attemptMetrics[0].role).toBe("validator-review");
+    expect(out.attemptMetrics[0].assignedModel).toBe(PRO.label);
+    expect(out.attemptMetrics[0].actualModel).toBe(PRO.label);
+    expect(out.attemptMetrics[0].failover).toBe(false);
+    expect(out.attemptMetrics[1].assignedModel).toBe(PRO.label);
+    expect(out.attemptMetrics[1].actualModel).toBe(MIMO.label);
+    expect(out.attemptMetrics[1].failover).toBe(true);
+  });
+
+  it("fails the validator-review lane CLOSED after one attempt on a single-model roster, even on 404", async () => {
+    const rec = recorder([fail(PRO.label, "provider_unavailable")]);
+    const out = await executeLensWithRetry({
+      job: job(PRO, "validator-review"),
+      roster: [PRO],
+      deps: { runAttempt: rec.runAttempt },
+    });
+
+    expect(rec.seen).toHaveLength(1);
+    expect(out.retried).toBe(false);
+    expect(out.lensResult.conclusion).toBe("failure");
   });
 
   it("fails closed after one attempt when a single-model roster offers no failover", async () => {

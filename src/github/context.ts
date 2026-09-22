@@ -125,6 +125,38 @@ export function parseJobTimeoutMinutesInput(value: string): number | undefined {
 }
 
 /**
+ * Parse `validator_run_timeout_seconds`, FAILING CLOSED on anything unreadable.
+ *
+ * Same doctrine as `parseJobTimeoutMinutesInput` / `parseReasoningMaxTokensInput`
+ * above. This value is read to (a) bound the validator roles' wall clock and
+ * (b) assert the serial wall-clock budget in `assessSerialBudget` — asserting it
+ * against a misread number would report a fit that the job never had.
+ *
+ * An EMPTY value is the SHIPPED DEFAULT: it means "inherit `run_timeout_seconds`",
+ * so a consumer that never sets this input behaves exactly as it did before the
+ * input existed (undefined → resolved to `runTimeoutSeconds` in the orchestrator).
+ *
+ * @throws {Error} when the value is present and not a positive integer.
+ */
+export function parseValidatorRunTimeoutSecondsInput(value: string): number | undefined {
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  // Plain decimal digits only, for the same `1e2`-style misread reason as
+  // `parseJobTimeoutMinutesInput` above.
+  const parsed = /^\d+$/.test(normalized) ? Number(normalized) : NaN;
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `Invalid validator_run_timeout_seconds input: "${normalized}". ` +
+        "Expected a positive integer number of seconds. " +
+        "Refusing to run: a misread validator budget would either starve the one role with no " +
+        "degradation tolerance below it or silently widen the serial wall-clock bound the " +
+        "budget guard asserts against.",
+    );
+  }
+  return parsed;
+}
+
+/**
  * Parse `reasoning_max_tokens`, FAILING CLOSED on anything unreadable.
  *
  * Same doctrine as the two safety parsers above. An EMPTY value is not a
@@ -183,6 +215,9 @@ export function parseInputs(): ActionInputs {
     systemPrompt: core.getInput("system_prompt") || "",
     maxTurns: parseInt(core.getInput("max_turns") || "20", 10),
     runTimeoutSeconds: parsePositiveIntegerInput("run_timeout_seconds", core.getInput("run_timeout_seconds"), 600),
+    validatorRunTimeoutSeconds: parseValidatorRunTimeoutSecondsInput(
+      core.getInput("validator_run_timeout_seconds"),
+    ),
     jobTimeoutMinutes: parseJobTimeoutMinutesInput(core.getInput("job_timeout_minutes")),
     openRouterProviderPreferences: parseOpenRouterProviderPreferences(
       core.getInput("openrouter_provider_preferences"),

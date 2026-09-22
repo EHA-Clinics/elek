@@ -15,6 +15,15 @@ export interface ActionInputs {
   /** Wall-clock timeout for one pi invocation, in seconds. */
   runTimeoutSeconds: number;
   /**
+   * Wall-clock timeout for the VALIDATOR roles (the `validator-review` lens and
+   * the final synthesis), in seconds. Undefined — the shipped default — means
+   * "inherit `runTimeoutSeconds`", which is exactly the behaviour before this
+   * input existed. A caller that opts in is raising the budget for the one role
+   * that has no degradation tolerance below it: the validator is the single
+   * serial phase whose failure discards every healthy lens report (EHAC-2833).
+   */
+  validatorRunTimeoutSeconds?: number;
+  /**
    * The caller's own `timeout-minutes` for the review job, mirrored into the
    * action so the serial wall-clock budget can be asserted BEFORE any model runs
    * (see `src/review/serial-budget.ts`).

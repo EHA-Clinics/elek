@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `validator_run_timeout_seconds` (EHAC-2833): a wall-clock budget for the
+  VALIDATOR roles — the `validator-review` audit lens and the final synthesis —
+  separate from the reviewer `run_timeout_seconds`. Empty (the default) inherits
+  the reviewer budget byte-identically. Opt in when the validator, the one role
+  with no degradation tolerance below it, times out while still streaming work:
+  more budget is the evidenced remedy for that shape, whereas a timeout retry
+  was falsified by measurement. The serial-budget guard now asserts
+  `setup + max(2 x reviewer, 2 x validator-review) + validator` whenever this
+  input is set, and keeps the shipped `setup + 2 x run_timeout_seconds` bound
+  when it is not.
+- The `validator-review` lane may now fail over ONCE, on `provider_unavailable`
+  (HTTP 404) ONLY. Every other failure class on the validator lane stays a
+  blocking no-retry — `timeout` above all, which is a property of the prompt
+  rather than the model. The 2026-09-19 alias outage breached every council in
+  the fleet because the validator could not move; the failover draws from the
+  same distinct reviewer roster, so during such an outage the independent audit
+  temporarily runs on a reviewer model — visible in attempt metrics as
+  `assignedModel != actualModel`, and the accepted alternative to a dead
+  validator.
+
 ### Fixed
 
 - Public review output no longer corrupts model labels. `redactInternalModelLabels`

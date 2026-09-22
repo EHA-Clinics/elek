@@ -1,10 +1,20 @@
 /**
- * Serial wall-clock budget guard (EHAC-2280, AC #4).
+ * Serial wall-clock budget guard (EHAC-2280, AC #4; EHAC-2833 revision).
  *
- * A council does NOT run its lenses and its validator concurrently: the validator
- * runs AFTER the reviewer lenses. So the serial worst case for one job is
+ * A council does NOT run its lenses and its validator concurrently: the final
+ * validator runs AFTER the reviewer wave. The wave itself runs the reviewer
+ * lenses AND the `validator-review` audit lens in parallel. So the serial worst
+ * case for one job is
  *
- *     setup + reviewer_cap + validator_cap  =  setup + 2 * run_timeout_seconds
+ *     setup + max(2 x reviewer_cap, 2 x validator_cap) + validator_cap
+ *
+ * where the DOUBLE cap is the reach of the ONE permitted outer retry
+ * (`MAX_LENS_ATTEMPTS = 2`): an attempt plus a failover on the worst job in the
+ * wave, then the final synthesis after the wave drains. `timeout` never retries
+ * (falsified at eha_care #3680), so the realistic bound is a single cap per
+ * phase — but the guard asserts the retry-reachable bound, because a retry is
+ * exactly the thing a future change re-enables and a green guard must not be
+ * quietly understating the ceiling it claims to have checked.
  *
  * and if that exceeds the job's own `timeout-minutes`, the runner cancels the job
  * mid-flight. A cancelled job loses the coverage record ENTIRELY — the required
@@ -37,6 +47,12 @@ export const SETUP_SECONDS = 37;
 
 export interface SerialBudgetInput {
   runTimeoutSeconds: number;
+  /**
+   * The validator roles' per-run cap, as passed by the caller. ABSENT (undefined)
+   * when the caller does not set `validator_run_timeout_seconds`, which resolves
+   * to `runTimeoutSeconds` — and to TODAY'S ARITHMETIC (see `assess`).
+   */
+  validatorRunTimeoutSeconds?: number;
   /** Absent when the caller does not pass `job_timeout_minutes`. */
   jobTimeoutMinutes: number | undefined;
   setupSeconds?: number;
@@ -54,10 +70,26 @@ export interface SerialBudgetAssessment {
  */
 export function assessSerialBudget({
   runTimeoutSeconds,
+  validatorRunTimeoutSeconds,
   jobTimeoutMinutes,
   setupSeconds = SETUP_SECONDS,
 }: SerialBudgetInput): SerialBudgetAssessment {
-  const required = setupSeconds + 2 * runTimeoutSeconds;
+  // BYTE-IDENTICAL WHEN UNSET. A caller that has not opted into the validator
+  // budget is asserted against exactly the formula this guard shipped with
+  // (`setup + 2 * run_timeout_seconds`). Using the full retry-reachable formula
+  // with V resolved to R would demand `setup + 3R` from every consumer that has
+  // not adopted the new input, refusing previously-green callers at preflight.
+  // The residual that formula covers (a slow provider_unavailable burning a full
+  // cap before its failover) exists for the reviewer wave TOO and predates this
+  // input — it is the documented accepted residual, not a new gap this change
+  // introduces.
+  const validatorSeconds = validatorRunTimeoutSeconds ?? runTimeoutSeconds;
+  const required =
+    validatorRunTimeoutSeconds === undefined
+      ? setupSeconds + 2 * runTimeoutSeconds
+      : setupSeconds +
+        Math.max(2 * runTimeoutSeconds, 2 * validatorSeconds) +
+        validatorSeconds;
 
   if (jobTimeoutMinutes === undefined) {
     return {
@@ -65,7 +97,7 @@ export function assessSerialBudget({
       message:
         "Serial wall-clock budget NOT CHECKED: this caller does not pass `job_timeout_minutes`, " +
         `so elek cannot see the job cap it would be checked against. The serial worst case here is ` +
-        `${setupSeconds}s setup + 2 x ${runTimeoutSeconds}s (reviewer lenses, then the validator) = ${required}s. ` +
+        `${setupSeconds}s setup + ${validatorRunTimeoutSeconds === undefined ? `2 x ${runTimeoutSeconds}s` : `max(2 x ${runTimeoutSeconds}s reviewer, 2 x ${validatorSeconds}s validator-review) + ${validatorSeconds}s validator`} = ${required}s. ` +
         "Pass `job_timeout_minutes` from the caller to have this asserted. Until then a job cancelled " +
         "by the outer cap will lose its coverage record with no warning beyond this line.",
     };
@@ -80,20 +112,22 @@ export function assessSerialBudget({
         "Serial wall-clock budget EXCEEDED — refusing to start, because a job cancelled by the outer " +
         "cap loses its coverage record entirely and reports no findings at all.\n" +
         `  run_timeout_seconds : ${runTimeoutSeconds}\n` +
+        `  validator_run_timeout_seconds : ${validatorRunTimeoutSeconds === undefined ? "(unset — inherits the reviewer budget)" : validatorSeconds}\n` +
         `  job_timeout_minutes : ${jobTimeoutMinutes}\n` +
-        `  serial worst case   : ${setupSeconds} + 2 x ${runTimeoutSeconds} = ${required}s\n` +
+        `  serial worst case   : ${setupSeconds} + ${validatorRunTimeoutSeconds === undefined ? `2 x ${runTimeoutSeconds}` : `max(2 x ${runTimeoutSeconds} reviewer, 2 x ${validatorSeconds} validator-review) + ${validatorSeconds} validator`} = ${required}s\n` +
         `  job cap             : ${jobTimeoutMinutes} x 60 = ${capSeconds}s\n` +
         `  ${required}s > ${capSeconds}s\n` +
         "The validator runs AFTER the reviewer lenses, so two full per-run budgets can elapse back " +
-        "to back. Raise `job_timeout_minutes` FIRST, then `run_timeout_seconds` — never the reverse.",
+        "to back. Raise `job_timeout_minutes` FIRST, then the per-run budgets — never the reverse.",
     };
   }
 
   return {
     outcome: "pass",
     message:
-      `Serial wall-clock budget checked: ${setupSeconds} + 2 x ${runTimeoutSeconds} = ${required}s ` +
-      `<= ${jobTimeoutMinutes} x 60 = ${capSeconds}s.`,
+      `Serial wall-clock budget checked: ${setupSeconds} + ` +
+      `${validatorRunTimeoutSeconds === undefined ? `2 x ${runTimeoutSeconds}` : `max(2 x ${runTimeoutSeconds} reviewer, 2 x ${validatorSeconds} validator-review) + ${validatorSeconds} validator`} ` +
+      `= ${required}s <= ${jobTimeoutMinutes} x 60 = ${capSeconds}s.`,
   };
 }
 

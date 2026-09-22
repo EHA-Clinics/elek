@@ -788,9 +788,40 @@ describe("resolveLensRetry", () => {
     expect(resolveLensRetry({ ...base, failureClass: "provider_transient", attemptsSoFar: 2 }).retry).toBe(false);
   });
 
-  it("never retries a successful attempt or the validator-review lane", () => {
+  it("validator-review fails over ONLY on provider_unavailable — the 404 availability class", () => {
+    // EHAC-2833. The lane was formerly blanket no-retry; the 2026-09-19 alias
+    // outage (every council in the fleet breaching on a validator 404) is why the
+    // one availability class now moves models. Everything else stays blocking.
+    const decision = resolveLensRetry({ ...base, role: "validator-review", failureClass: "provider_unavailable" });
+    expect(decision.retry).toBe(true);
+    expect(decision.failover).toBe(true);
+    expect(decision.model!.label).toBe(MIMO.label);
+    // PAIRED DIRECTION: the independence trade is visible — the audit moves onto
+    // a REVIEWER model. attempt metrics keep assigned != actual so the census can
+    // show it (asserted in lens-execution tests).
+  });
+
+  it("never retries validator-review on any other failure class — including timeout", () => {
+    for (const failureClass of [
+      "stall",
+      "timeout",
+      "max_turns",
+      "invalid_output",
+      "provider_transient",
+      "provider_permanent",
+      "process_error",
+      "unknown",
+    ] as const) {
+      const decision = resolveLensRetry({ ...base, role: "validator-review", failureClass });
+      expect(decision.retry).toBe(false);
+      expect(decision.reason).toContain("provider_unavailable");
+    }
+    // An ABSENT class is `unknown`, which is also not the 404 class.
+    expect(resolveLensRetry({ ...base, role: "validator-review", failureClass: undefined }).retry).toBe(false);
+  });
+
+  it("never retries a successful attempt", () => {
     expect(resolveLensRetry({ ...base, conclusion: "success", failureClass: undefined }).retry).toBe(false);
-    expect(resolveLensRetry({ ...base, role: "validator-review", failureClass: "stall" }).retry).toBe(false);
     // ...and validator-review is still excluded from the required-failure set.
     expect(
       failedRequiredReviewLensIds([

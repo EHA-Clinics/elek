@@ -19,7 +19,7 @@ import {
   SETUP_SECONDS,
   type SerialBudgetReporter,
 } from "../src/review/serial-budget";
-import { parseJobTimeoutMinutesInput } from "../src/github/context";
+import { parseJobTimeoutMinutesInput, parseValidatorRunTimeoutSecondsInput } from "../src/github/context";
 
 function spyReporter() {
   const calls: { info: string[]; warning: string[]; setFailed: string[] } = {
@@ -34,6 +34,28 @@ function spyReporter() {
   };
   return { reporter, calls };
 }
+
+describe("parseValidatorRunTimeoutSecondsInput", () => {
+  it("treats an empty value as documented INHERITANCE, not misconfiguration", () => {
+    expect(parseValidatorRunTimeoutSecondsInput("")).toBeUndefined();
+    expect(parseValidatorRunTimeoutSecondsInput("   ")).toBeUndefined();
+  });
+
+  it("parses a well-formed value", () => {
+    expect(parseValidatorRunTimeoutSecondsInput("1200")).toBe(1200);
+    expect(parseValidatorRunTimeoutSecondsInput(" 900 ")).toBe(900);
+  });
+
+  // Throw-on-garbage, per the safety-parser doctrine. This number asserts the
+  // serial wall-clock bound; asserting against a misread value is worse than not
+  // asserting.
+  it.each(["12O", "0", "-1", "12.5", "abc", "1e2", "1200s"])(
+    "throws on %p, naming the input",
+    (bad) => {
+      expect(() => parseValidatorRunTimeoutSecondsInput(bad)).toThrow(/validator_run_timeout_seconds/);
+    },
+  );
+});
 
 describe("parseJobTimeoutMinutesInput", () => {
   it("treats an empty value as documented ABSENCE, not misconfiguration", () => {
@@ -95,6 +117,52 @@ describe("assessSerialBudget", () => {
     // so assert the nearest exact case: 37 + 2*400 = 837 <= 840 (14 minutes).
     expect(assessSerialBudget({ runTimeoutSeconds: 400, jobTimeoutMinutes: 14 }).outcome).toBe("pass");
     expect(assessSerialBudget({ runTimeoutSeconds: 400, jobTimeoutMinutes: 13 }).outcome).toBe("fail");
+  });
+
+  // ── EHAC-2833: the validator roles carry their own wall clock ────────────────
+
+  it("is BYTE-IDENTICAL when the validator input is unset (2R formula, not the retry-aware one)", () => {
+    // Unset means V := R. Using the retry-aware formula there would demand
+    // `setup + 3R` from every consumer that has not adopted the input and red
+    // previously-passing callers at preflight.
+    const r = assessSerialBudget({ runTimeoutSeconds: 600, jobTimeoutMinutes: 30 });
+    expect(r.outcome).toBe("pass");
+    expect(r.message).toContain("2 x 600");
+  });
+
+  it("enforces the retry-aware bound when the validator input is set", () => {
+    // 37 + max(2*900, 2*1200) + 1200 = 37 + 2400 + 1200 = 3637 <= 3900 (65 min).
+    const r = assessSerialBudget({
+      runTimeoutSeconds: 900,
+      validatorRunTimeoutSeconds: 1200,
+      jobTimeoutMinutes: 65,
+    });
+    expect(r.outcome).toBe("pass");
+    expect(r.message).toContain("3637");
+    expect(r.message).toContain("3900");
+  });
+
+  it("FAILS when the validator budget grew without the cap moving first", () => {
+    // 37 + 2400 + 1200 = 3637 > 3300 (55 min) — the exact shape the caller
+    // arithmetic comment in eha_care/ehe-care-infra must never regress into.
+    const r = assessSerialBudget({
+      runTimeoutSeconds: 900,
+      validatorRunTimeoutSeconds: 1200,
+      jobTimeoutMinutes: 55,
+    });
+    expect(r.outcome).toBe("fail");
+    for (const n of ["900", "1200", "3637", "3300"]) expect(r.message).toContain(n);
+  });
+
+  it("still holds when the validator budget is SMALLER than the reviewer budget", () => {
+    // 37 + max(2*900, 2*600) + 600 = 37 + 1800 + 600 = 2437 <= 2700.
+    const r = assessSerialBudget({
+      runTimeoutSeconds: 900,
+      validatorRunTimeoutSeconds: 600,
+      jobTimeoutMinutes: 45,
+    });
+    expect(r.outcome).toBe("pass");
+    expect(r.message).toContain("2437");
   });
 });
 

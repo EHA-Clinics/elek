@@ -51,6 +51,12 @@ export interface SerialBudgetInput {
    * The validator roles' per-run cap, as passed by the caller. ABSENT (undefined)
    * when the caller does not set `validator_run_timeout_seconds`, which resolves
    * to `runTimeoutSeconds` — and to TODAY'S ARITHMETIC (see `assess`).
+   *
+   * Deliberately NOT normalized: setting this EXPLICITLY EQUAL to
+   * `run_timeout_seconds` is an opt-in to the validator budget and is asserted
+   * against the STRICTER retry-aware formula (`setup + 3R`), not the legacy
+   * `setup + 2R` the unset form keeps. Equality of the two numbers does not make
+   * the two configurations identical. (EHAC-2841)
    */
   validatorRunTimeoutSeconds?: number;
   /** Absent when the caller does not pass `job_timeout_minutes`. */

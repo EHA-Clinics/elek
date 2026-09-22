@@ -103,7 +103,12 @@ export function parseStallTimeoutSecondsInput(value: string): number {
  * Absence returns `undefined` so the guard can report `unchecked` instead of
  * silently passing.
  *
- * @throws {Error} when the value is present and not a positive integer.
+ * Values above `Number.MAX_SAFE_INTEGER` are REJECTED: the budget guard multiplies
+ * the resolved cap, and arithmetic past 2^53 silently loses precision.
+ * (EHAC-2841)
+ *
+ * @throws {Error} when the value is present and not a positive integer within
+ *   safe-integer range.
  */
 export function parseJobTimeoutMinutesInput(value: string): number | undefined {
   const normalized = value.trim();
@@ -121,7 +126,32 @@ export function parseJobTimeoutMinutesInput(value: string): number | undefined {
         "inside the job cap, and asserting it against a misread number is worse than not asserting it.",
     );
   }
+  assertWithinSafeIntegerRange(normalized, parsed, "job_timeout_minutes", "minutes");
   return parsed;
+}
+
+/**
+ * Shared guard for the strict safety parsers: reject a value that digits-parses
+ * but exceeds `Number.MAX_SAFE_INTEGER`. `Number("10000000000000000000")` is
+ * 10000000000000000000 exactly only up to 2^53; past that, ordinary arithmetic
+ * (`parsed * 2`, `parsed * 3`) silently loses precision, so a budget guard that
+ * multiplied it would assert a fit the run never had. Throw, never clamp —
+ * clamping would turn a typo into a DIFFERENT cap than the one reported.
+ * (EHAC-2841)
+ */
+function assertWithinSafeIntegerRange(
+  normalized: string,
+  parsed: number,
+  inputName: string,
+  unit: string,
+): void {
+  if (parsed <= Number.MAX_SAFE_INTEGER) return;
+  throw new Error(
+    `Invalid ${inputName} input: "${normalized}". ` +
+      `Expected a positive integer number of ${unit} no larger than Number.MAX_SAFE_INTEGER (2^53 - 1). ` +
+      "Refusing to run: the serial wall-clock budget guard multiplies this value, and " +
+      "arithmetic above 2^53 silently loses precision — the asserted fit would not be the real fit.",
+  );
 }
 
 /**
@@ -136,7 +166,12 @@ export function parseJobTimeoutMinutesInput(value: string): number | undefined {
  * so a consumer that never sets this input behaves exactly as it did before the
  * input existed (undefined → resolved to `runTimeoutSeconds` in the orchestrator).
  *
- * @throws {Error} when the value is present and not a positive integer.
+ * Values above `Number.MAX_SAFE_INTEGER` are REJECTED, not parsed: the serial
+ * budget guard multiplies this value (2x/3x), and arithmetic past 2^53 silently
+ * loses precision, so the asserted fit would not be the real fit. (EHAC-2841)
+ *
+ * @throws {Error} when the value is present and not a positive integer within
+ *   safe-integer range.
  */
 export function parseValidatorRunTimeoutSecondsInput(value: string): number | undefined {
   const normalized = value.trim();
@@ -153,6 +188,7 @@ export function parseValidatorRunTimeoutSecondsInput(value: string): number | un
         "budget guard asserts against.",
     );
   }
+  assertWithinSafeIntegerRange(normalized, parsed, "validator_run_timeout_seconds", "seconds");
   return parsed;
 }
 

@@ -602,6 +602,67 @@ describe("review strategy", () => {
     expect(prompt).toContain("comment_id: 123");
   });
 
+  // ── EHAC-2841: failover provenance in the synthesis evidence ────────────────
+  //
+  // The synthesis prompt is the PUBLIC record of which model produced each
+  // candidate report. Before v1.6.1 it carried only the ASSIGNED model, so a
+  // validator-review 404 failover made the record attribute the replacement
+  // model's work to the model that had produced nothing. These tests assert
+  // both shapes: failover reports carry model=actual + assigned_model + failover,
+  // and non-failover reports carry no provenance additions at all (byte-stable).
+
+  it("names the ACTUAL model in a failover report, with the assigned model as provenance", () => {
+    const prompt = buildSynthesisPrompt({
+      data: dataFixture,
+      userRequest: "",
+      modelLabel: "deepseek/deepseek-v4-pro",
+      jobRunLink: "https://github.com/selimozten/elek/actions/runs/1",
+      reports: [
+        {
+          lens: { id: "contract-drift", title: "Contract Drift", focus: "Interfaces." },
+          // activeJob.model.label — the replacement that produced the output.
+          modelLabel: "openrouter/moonshotai/kimi-k2.7-code",
+          assignedModelLabel: "openrouter/deepseek/deepseek-v4-pro",
+          failoverUsed: true,
+          output: "Report from the replacement model",
+          conclusion: "success",
+        },
+      ],
+    });
+
+    expect(prompt).toContain(
+      '<reviewer_report lens="contract-drift" title="Contract Drift" ' +
+        'model="openrouter/moonshotai/kimi-k2.7-code" ' +
+        'assigned_model="openrouter/deepseek/deepseek-v4-pro" ' +
+        'failover="true" conclusion="success">',
+    );
+    expect(prompt).toContain("Report from the replacement model");
+  });
+
+  it("adds NO provenance attributes to a non-failover report (byte-stable shape)", () => {
+    const prompt = buildSynthesisPrompt({
+      data: dataFixture,
+      userRequest: "",
+      modelLabel: "deepseek/deepseek-v4-pro",
+      jobRunLink: "https://github.com/selimozten/elek/actions/runs/1",
+      reports: [
+        {
+          lens: { id: "risk", title: "Risk Review", focus: "Correctness." },
+          modelLabel: "deepseek/deepseek-v4-pro",
+          output: "clean",
+          conclusion: "success",
+        },
+      ],
+    });
+
+    expect(prompt).toContain(
+      '<reviewer_report lens="risk" title="Risk Review" ' +
+        'model="deepseek/deepseek-v4-pro" conclusion="success">',
+    );
+    expect(prompt).not.toContain("assigned_model=");
+    expect(prompt).not.toContain('failover="true"');
+  });
+
   it("uses the public model label in final synthesis output instructions", () => {
     const prompt = buildSynthesisPrompt({
       data: dataFixture,

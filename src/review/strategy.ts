@@ -204,9 +204,13 @@ export interface LensRetryDecision {
  * mode: the second attempt re-sent a byte-identical prompt to the model that had
  * just hung, and burned another full wall-clock budget confirming it.
  *
- * `validator-review` is never retried here. It is not covered by the reviewer
- * degradation budget either, so a retry would only delay a failure that is going
- * to be blocking regardless.
+ * The `validator-review` lane is NO LONGER blanket no-retry (EHAC-2833), but it
+ * is far from reviewer treatment: it fails over ONCE, on `provider_unavailable`
+ * ONLY. Its failure is blocking at any tolerance, so a retry that cannot change
+ * the outcome only bills for it; a 404 is model AVAILABILITY, where moving is
+ * the remedy by definition, and the 2026-09-19 alias outage showed a dead
+ * validator breaching every council in the fleet. `timeout` in particular stays
+ * a no-retry there: it is a property of the prompt, not the model.
  */
 export function resolveLensRetry(params: {
   role?: ReviewJob["role"];
@@ -219,8 +223,12 @@ export function resolveLensRetry(params: {
   const no = (reason: string): LensRetryDecision => ({ retry: false, failover: false, reason });
 
   if (params.conclusion !== "failure") return no("the attempt succeeded");
-  if (params.role === "validator-review") {
-    return no("validator-review is not retried; its failure is blocking either way");
+  const failureClass: PiFailureClass = params.failureClass ?? "unknown";
+
+  if (params.role === "validator-review" && failureClass !== "provider_unavailable") {
+    return no(
+      "validator-review retries only on provider_unavailable; every other failure class is blocking either way",
+    );
   }
   if (params.attemptsSoFar >= MAX_LENS_ATTEMPTS) {
     return no(`the retry budget of ${MAX_LENS_ATTEMPTS} attempt(s) is exhausted`);
@@ -228,7 +236,6 @@ export function resolveLensRetry(params: {
 
   // An unclassified failure is treated exactly like `unknown`: no retry. Absence
   // of a class is not evidence that a retry would help.
-  const failureClass: PiFailureClass = params.failureClass ?? "unknown";
   const policy = FAILURE_RETRY_POLICY[failureClass] ?? FAILURE_RETRY_POLICY.unknown;
   if (!policy.retry) {
     return no(`failure class "${failureClass}" is not retried`);

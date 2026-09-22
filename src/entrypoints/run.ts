@@ -146,6 +146,7 @@ async function run(): Promise<void> {
   // the whole point: an honest configuration error beats a guillotine 30 minutes in.
   const budget = assessSerialBudget({
     runTimeoutSeconds: parsedInputs.runTimeoutSeconds,
+    validatorRunTimeoutSeconds: parsedInputs.validatorRunTimeoutSeconds,
     jobTimeoutMinutes: parsedInputs.jobTimeoutMinutes,
   });
   if (reportSerialBudget(budget, core) === "abort") {
@@ -319,6 +320,17 @@ async function run(): Promise<void> {
     configureGitAuth(githubToken, context);
   }
   const piInputs = { ...inputs, tools: piTools };
+  // The validator roles' wall clock. Unset input → inherit the reviewer budget,
+  // which is byte-identical to the behaviour before the input existed. Resolved
+  // ONCE here so the budget guard, the validator-review lens and the final
+  // synthesis all read the same number.
+  const validatorRunTimeout = inputs.validatorRunTimeoutSeconds ?? inputs.runTimeoutSeconds;
+  if (inputs.validatorRunTimeoutSeconds !== undefined) {
+    console.log(
+      `[config] validator_run_timeout_seconds=${validatorRunTimeout}s ` +
+        `(reviewer run_timeout_seconds=${inputs.runTimeoutSeconds}s)`,
+    );
+  }
 
   let reviewPlan = resolveReviewPlan(inputs);
   let reviewPlanSupport = resolveReviewPlanSupport(reviewPlan.strategy, {
@@ -634,6 +646,10 @@ async function run(): Promise<void> {
       thinking: job.role === "validator-review"
         ? inputs.advisorThinking || inputs.validatorThinking || inputs.thinking
         : inputs.thinking,
+      // The validator-review audit lens is a VALIDATOR role, not a reviewer: it
+      // carries the validator budget (EHAC-2833), not the reviewer's.
+      runTimeoutSeconds:
+        job.role === "validator-review" ? validatorRunTimeout : piInputs.runTimeoutSeconds,
       tools: lensTools,
       mode: "review",
     });
@@ -792,6 +808,9 @@ async function run(): Promise<void> {
       provider: reviewPlan.validator.provider,
       model: reviewPlan.validator.model,
       thinking: inputs.validatorThinking || inputs.thinking,
+      // The synthesis is the second VALIDATOR role and runs after the wave; it
+      // carries the same validator budget as the audit lens (EHAC-2833).
+      runTimeoutSeconds: validatorRunTimeout,
       tools: piTools,
       mode: "review",
     };

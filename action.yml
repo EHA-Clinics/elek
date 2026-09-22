@@ -81,6 +81,20 @@ inputs:
     description: "Wall-clock timeout for each model run. elek reports a failure review before the outer GitHub step timeout can leave a stale tracking comment."
     required: false
     default: "600"
+  validator_run_timeout_seconds:
+    description: >-
+      Wall-clock timeout for the VALIDATOR roles (the validator-review audit lens
+      and the final synthesis), in seconds. Empty (default) INHERITS
+      run_timeout_seconds, so consumers that do not set it are byte-identical to
+      before. Opt in when the validator — the one role with no degradation
+      tolerance below it — runs out of wall clock while still streaming work:
+      more budget is the evidenced remedy for that shape (the timeout retry is
+      NOT, having been falsified by measurement). Callers that set this MUST
+      recheck the serial arithmetic: the guard now demands
+      `setup + max(2 x reviewer, 2 x validator-review) + validator` to fit inside
+      job_timeout_minutes, and refuses to run otherwise. (EHAC-2833)
+    required: false
+    default: ""
   job_timeout_minutes:
     description: >-
       The caller's own `timeout-minutes` for the review job, mirrored in so elek can assert the
@@ -373,6 +387,7 @@ runs:
         INPUT_SYSTEM_PROMPT: ${{ inputs.system_prompt }}
         INPUT_MAX_TURNS: ${{ inputs.max_turns }}
         INPUT_RUN_TIMEOUT_SECONDS: ${{ inputs.run_timeout_seconds }}
+        INPUT_VALIDATOR_RUN_TIMEOUT_SECONDS: ${{ inputs.validator_run_timeout_seconds }}
         INPUT_JOB_TIMEOUT_MINUTES: ${{ inputs.job_timeout_minutes }}
         INPUT_OPENROUTER_PROVIDER_PREFERENCES: ${{ inputs.openrouter_provider_preferences }}
         INPUT_OPENROUTER_MODEL_REASONING_MODES: ${{ inputs.openrouter_model_reasoning_modes }}

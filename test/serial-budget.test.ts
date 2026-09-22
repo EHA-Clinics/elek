@@ -55,6 +55,22 @@ describe("parseValidatorRunTimeoutSecondsInput", () => {
       expect(() => parseValidatorRunTimeoutSecondsInput(bad)).toThrow(/validator_run_timeout_seconds/);
     },
   );
+
+  // ── EHAC-2841: safe-integer range ──────────────────────────────────────────
+  // These values digit-parse and Number.isInteger accepts them, but the serial
+  // budget guard MULTIPLIES the resolved number; past 2^53 that multiplication
+  // silently loses precision, so the asserted fit would not be the real fit.
+
+  it("rejects integers above Number.MAX_SAFE_INTEGER (validator budget)", () => {
+    expect(() => parseValidatorRunTimeoutSecondsInput("10000000000000000000"))
+      .toThrow(/MAX_SAFE_INTEGER/);
+    expect(() => parseValidatorRunTimeoutSecondsInput("9007199254740993")) // 2^53 + 1
+      .toThrow(/validator_run_timeout_seconds/);
+  });
+
+  it("accepts exactly Number.MAX_SAFE_INTEGER (the boundary is inclusive)", () => {
+    expect(parseValidatorRunTimeoutSecondsInput("9007199254740991")).toBe(Number.MAX_SAFE_INTEGER);
+  });
 });
 
 describe("parseJobTimeoutMinutesInput", () => {
@@ -77,6 +93,15 @@ describe("parseJobTimeoutMinutesInput", () => {
       expect(() => parseJobTimeoutMinutesInput(bad)).toThrow(/job_timeout_minutes/);
     },
   );
+
+  it("rejects integers above Number.MAX_SAFE_INTEGER (job cap)", () => {
+    expect(() => parseJobTimeoutMinutesInput("10000000000000000000"))
+      .toThrow(/MAX_SAFE_INTEGER/);
+  });
+
+  it("accepts exactly Number.MAX_SAFE_INTEGER (the boundary is inclusive)", () => {
+    expect(parseJobTimeoutMinutesInput("9007199254740991")).toBe(Number.MAX_SAFE_INTEGER);
+  });
 });
 
 describe("assessSerialBudget", () => {
@@ -163,6 +188,50 @@ describe("assessSerialBudget", () => {
     });
     expect(r.outcome).toBe("pass");
     expect(r.message).toContain("2437");
+  });
+
+  // ── EHAC-2841: explicit V == R is a STRICTER OPT-IN, never normalized ───────
+  //
+  // Unset V means "inherit R" and keeps the legacy `setup + 2R` formula, so
+  // callers that never adopted the input stay green. But a caller that types
+  // V = R EXPLICITLY has opted into the validator budget, and the honest bound
+  // for an opted-in council is the retry-aware `setup + 3R`. Normalizing
+  // explicit equality back to `2R` would make the guard report a ceiling the
+  // retry path can actually exceed, so the strictness is deliberate and
+  // documented here as tests, not just comments.
+
+  it("treats EXPLICIT V == R as stricter than UNSET V (the surprise case, documented)", () => {
+    const unset = assessSerialBudget({ runTimeoutSeconds: 600, jobTimeoutMinutes: 30 });
+    const explicitEqual = assessSerialBudget({
+      runTimeoutSeconds: 600,
+      validatorRunTimeoutSeconds: 600,
+      jobTimeoutMinutes: 30,
+    });
+    expect(unset.outcome).toBe("pass"); // 37 + 2*600 = 1237 <= 1800
+    expect(explicitEqual.outcome).toBe("fail"); // 37 + 1200 + 600 = 1837 > 1800
+    expect(explicitEqual.message).toContain("1837");
+  });
+
+  it("explicit V == R passes once the cap actually covers the retry-aware bound", () => {
+    // 37 + max(2*900, 2*900) + 900 = 37 + 1800 + 900 = 2737 <= 3900 (65 min).
+    const r = assessSerialBudget({
+      runTimeoutSeconds: 900,
+      validatorRunTimeoutSeconds: 900,
+      jobTimeoutMinutes: 65,
+    });
+    expect(r.outcome).toBe("pass");
+    expect(r.message).toContain("2737");
+  });
+
+  it("explicit V == R FAILS a cap that the unset form would pass (the trap, asserted)", () => {
+    // 37 + 3*900 = 2737 > 2700 (45 min) — the previously-green fleet shape.
+    const r = assessSerialBudget({
+      runTimeoutSeconds: 900,
+      validatorRunTimeoutSeconds: 900,
+      jobTimeoutMinutes: 45,
+    });
+    expect(r.outcome).toBe("fail");
+    for (const n of ["900", "2737", "2700"]) expect(r.message).toContain(n);
   });
 });
 

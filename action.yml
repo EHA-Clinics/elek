@@ -278,9 +278,12 @@ inputs:
     default: ""
   validator_thinking:
     description: >
-      Optional thinking level for the final orchestrator. Leave empty to
-      reuse thinking. Useful when cheap reviewer agents run high/max reasoning
-      but a frontier orchestrator should use medium reasoning.
+      Optional thinking level for the VALIDATOR roles: the final orchestrator
+      synthesis AND, when advisor_thinking is unset, the validator-review
+      audit lens. Leave empty to reuse thinking. Useful when cheap reviewer
+      agents run high/max reasoning but a frontier orchestrator should use
+      medium reasoning. Set advisor_thinking explicitly if the audit lens
+      should reason at a different level than the synthesis. (EHAC-2841)
     required: false
     default: ""
   severity_threshold:

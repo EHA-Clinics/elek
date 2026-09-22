@@ -749,7 +749,16 @@ export function buildSynthesisPrompt(params: {
   publicModelLabel?: string;
   jobRunLink: string;
   commentId?: number;
-  reports: Array<{ lens: ReviewLens; modelLabel: string; output: string; conclusion: "success" | "failure" }>;
+  reports: Array<{
+    lens: ReviewLens;
+    /** The model that ACTUALLY produced `output` (the active job's model). */
+    modelLabel: string;
+    output: string;
+    conclusion: "success" | "failure";
+    /** Present only when the decisive attempt ran on a FAILOVER replacement. */
+    assignedModelLabel?: string;
+    failoverUsed?: boolean;
+  }>;
   repoConfig?: ElekConfig;
   onBudget?: (report: DiffPromptBudgetReport) => void;
 }): string {
@@ -759,7 +768,15 @@ export function buildSynthesisPrompt(params: {
   const reportBlock = reports
     .map((r) =>
       [
-        `<reviewer_report lens="${r.lens.id}" title="${r.lens.title}" model="${r.modelLabel}" conclusion="${r.conclusion}">`,
+        // `model` is the model that produced the output. When a failover
+        // replaced the assigned model, `assigned_model` names the model the
+        // plan ORIGINALLY assigned and `failover="true"` says they differ, so
+        // the synthesis never mistakes the planned author for the real one.
+        `<reviewer_report lens="${r.lens.id}" title="${r.lens.title}" model="${r.modelLabel}"` +
+          (r.failoverUsed && r.assignedModelLabel
+            ? ` assigned_model="${r.assignedModelLabel}" failover="true"`
+            : "") +
+          ` conclusion="${r.conclusion}">`,
         r.output || "(no output)",
         `</reviewer_report>`,
       ].join("\n"),

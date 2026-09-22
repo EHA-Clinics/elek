@@ -79,6 +79,7 @@ import {
   type ReviewRunMetric,
 } from "../review/summary.js";
 import { executeLensWithRetry } from "../review/lens-execution.js";
+import { resolveRoleTimeouts } from "../review/role-timeouts.js";
 import {
   evaluateCouncilPolicy,
   type CouncilPolicyResult,
@@ -90,6 +91,7 @@ import { configuredPublicModelLabel, modelLabelRedactionTerms, publicModelLabelF
 import { inlineReviewBufferFromFindings } from "../review/inline-fallback.js";
 import { sanitize } from "../mcp/handlers.js";
 import type { PostSummary } from "./post-buffered.js";
+import type { ActionInputs } from "../types.js";
 
 /**
  * The live finalizer, visible to the top-level failure handler.
@@ -134,7 +136,25 @@ async function run(): Promise<void> {
   });
   activeFinalizer = finalizer;
 
-  const parsedInputs = parseInputs();
+  // A strict-parser throw is a CONFIGURATION error, not an unexpected one: it is
+  // the caller's input being unreadable, and it has a remedy in the message. The
+  // top-level catch can only say `unexpected_error`, which mislabels a typo in
+  // `validator_run_timeout_seconds` as an elek bug. Parse inside the guarded
+  // region and finalize with the honest terminal reason. (EHAC-2841)
+  let parsedInputs: ActionInputs;
+  try {
+    parsedInputs = parseInputs();
+  } catch (err) {
+    const failureMessage = err instanceof Error ? err.message : String(err);
+    console.error("Configuration error:", failureMessage);
+    core.setFailed(failureMessage);
+    finalizer.finalize({
+      conclusion: "failure",
+      terminalReason: "configuration_error",
+      failureMessage,
+    });
+    return;
+  }
 
   // EHAC-2280 (AC #4): assert the SERIAL wall-clock budget before any GitHub fetch
   // and before any model run. The validator runs AFTER the reviewer lenses, so the
@@ -320,14 +340,18 @@ async function run(): Promise<void> {
     configureGitAuth(githubToken, context);
   }
   const piInputs = { ...inputs, tools: piTools };
-  // The validator roles' wall clock. Unset input → inherit the reviewer budget,
-  // which is byte-identical to the behaviour before the input existed. Resolved
-  // ONCE here so the budget guard, the validator-review lens and the final
-  // synthesis all read the same number.
-  const validatorRunTimeout = inputs.validatorRunTimeoutSeconds ?? inputs.runTimeoutSeconds;
+  // The per-role wall clocks. Unset validator input → both validator roles inherit
+  // the reviewer budget, byte-identical to the behaviour before the input existed.
+  // Resolved ONCE here so the budget guard, the validator-review lens (and its
+  // failover replacement) and the final synthesis all read the same number.
+  // (EHAC-2833; resolver extracted for testability in EHAC-2841.)
+  const roleTimeouts = resolveRoleTimeouts({
+    runTimeoutSeconds: inputs.runTimeoutSeconds,
+    validatorRunTimeoutSeconds: inputs.validatorRunTimeoutSeconds,
+  });
   if (inputs.validatorRunTimeoutSeconds !== undefined) {
     console.log(
-      `[config] validator_run_timeout_seconds=${validatorRunTimeout}s ` +
+      `[config] validator_run_timeout_seconds=${roleTimeouts.validatorReview}s ` +
         `(reviewer run_timeout_seconds=${inputs.runTimeoutSeconds}s)`,
     );
   }
@@ -647,9 +671,11 @@ async function run(): Promise<void> {
         ? inputs.advisorThinking || inputs.validatorThinking || inputs.thinking
         : inputs.thinking,
       // The validator-review audit lens is a VALIDATOR role, not a reviewer: it
-      // carries the validator budget (EHAC-2833), not the reviewer's.
+      // carries the validator budget (EHAC-2833), not the reviewer's. Because
+      // the failover replacement preserves `role` (lens-execution), a 404
+      // failover resolves the SAME budget through the same role branch.
       runTimeoutSeconds:
-        job.role === "validator-review" ? validatorRunTimeout : piInputs.runTimeoutSeconds,
+        job.role === "validator-review" ? roleTimeouts.validatorReview : roleTimeouts.reviewer,
       tools: lensTools,
       mode: "review",
     });
@@ -796,9 +822,18 @@ async function run(): Promise<void> {
       core.warning(`[council] ${councilPolicy.message}`);
     }
 
-    const reports = lensRuns.map(({ job, lensResult, lensOutput }) => ({
+    const reports = lensRuns.map(({ job, activeJob, failoverUsed, lensResult, lensOutput }) => ({
       lens: job.lens,
-      modelLabel: job.model.label,
+      // The model that ACTUALLY produced this output, not the assigned one.
+      // After a validator-review 404 failover the assigned model produced nothing
+      // and its replacement produced the report; attributing the report to the
+      // failed model would let the synthesis and the public record agree on the
+      // wrong author. (EHAC-2841)
+      modelLabel: activeJob.model.label,
+      // Failover provenance is part of the evidence: the synthesis must be able
+      // to say which model was planned, which one delivered, and that the two
+      // differed. Only attached when they differed.
+      ...(failoverUsed ? { assignedModelLabel: job.model.label, failoverUsed } : {}),
       output: lensOutput,
       conclusion: lensResult.conclusion,
     }));
@@ -810,7 +845,7 @@ async function run(): Promise<void> {
       thinking: inputs.validatorThinking || inputs.thinking,
       // The synthesis is the second VALIDATOR role and runs after the wave; it
       // carries the same validator budget as the audit lens (EHAC-2833).
-      runTimeoutSeconds: validatorRunTimeout,
+      runTimeoutSeconds: roleTimeouts.validator,
       tools: piTools,
       mode: "review",
     };

@@ -1,1 +1,8 @@
-* @selimozten
+# elek is the review engine every org AI-review workflow vendors: its review code and its own
+# workflows need team ownership alongside the primary maintainer, so a single-person gate
+# cannot silently become the only gate (EHAC-2848).
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+/.github/workflows/          @EHA-Clinics/devops @selimozten
+/src/review/                 @EHA-Clinics/devops @selimozten
+/src/entrypoints/            @EHA-Clinics/devops @selimozten
+*                            @selimozten

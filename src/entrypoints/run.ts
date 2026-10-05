@@ -865,6 +865,9 @@ async function run(): Promise<void> {
       reports,
       repoConfig: effectiveRepoConfig,
       publicModelLabel,
+      // Synthesis reserves the actual reports; its remaining source budget can
+      // be smaller than every lens's. Include it in the coverage gate's minimum.
+      onBudget: (report) => promptBudgetByKey.set("validator-final", { ...report, lensId: "validator-final" }),
     });
     writeFileSync(join(promptDir, "prompt.md"), prompt, "utf-8");
   }

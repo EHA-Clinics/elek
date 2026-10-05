@@ -25,7 +25,7 @@
   "dependencies": {
     "@actions/core": "3.0.1",
     "@actions/github": "9.1.1",
-    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@earendil-works/pi-coding-agent": "1.0.2",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@octokit/rest": "22.0.1",
     "pi-mcp-adapter": "2.15.0",
@@ -40,8 +40,8 @@
   },
   "overrides": {
     "@hono/node-server": "2.0.12",
-    "brace-expansion": "5.0.8",
-    "undici": "8.9.0"
+    "brace-expansion": "5.0.12",
+    "undici": "8.10.2"
   },
   "keywords": [
     "github-actions",

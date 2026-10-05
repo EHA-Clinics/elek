@@ -1,5 +1,6 @@
 /** Request shaping and control-only telemetry; never write to Pi's JSON stdout. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { boundCouncilOutput } from "./council-output.js";
 import {
   parseReasoningModes, shapeReasoningRequest,
   REASONING_MAX_TOKENS_ENV, REASONING_MODES_ENV, REASONING_THINKING_ENV, REASONING_TELEMETRY_PREFIX, REASONING_NOT_APPLICABLE,
@@ -30,6 +31,6 @@ export default function registerReasoningControl(pi: ExtensionAPI): void {
       process.stderr.write(`${REASONING_TELEMETRY_PREFIX}${telemetry}\n`);
       lastTelemetry = telemetry;
     }
-    return shaped.payload;
+    return boundCouncilOutput(shaped.payload ?? event.payload as Record<string, unknown>, ctx.model) ?? shaped.payload;
   });
 }

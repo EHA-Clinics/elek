@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   review:
-    uses: EHA-Clinics/.github/.github/workflows/ai-code-review.yml@35f065595e583c7f8c75126bf27cde862f1f8e99
+    uses: EHA-Clinics/.github/.github/workflows/ai-code-review.yml@d467a22c583e16a6c9d1d3c3c410875e7c29ffe6
     with:
       max_turns: 45
       job_timeout_minutes: 65

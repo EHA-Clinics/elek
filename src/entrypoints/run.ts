@@ -78,6 +78,7 @@ import {
   type ReviewAttemptMetric,
   type ReviewRunMetric,
 } from "../review/summary.js";
+import { persistReviewReport } from "../review/report-artifact.js";
 import { executeLensWithRetry } from "../review/lens-execution.js";
 import { resolveRoleTimeouts } from "../review/role-timeouts.js";
 import {
@@ -704,8 +705,13 @@ async function run(): Promise<void> {
             // The prompt and the pi inputs are built FROM the job handed back, so
             // a substituted model gets its own prompt label and its own diff
             // budget rather than inheriting the failed model's.
-            runAttempt: (activeJob, promptName) =>
-              runPi(lensPromptFor(activeJob), lensInputsFor(activeJob), undefined, false, { promptName }),
+            runAttempt: async (activeJob, promptName) => {
+              const result = await runPi(lensPromptFor(activeJob), lensInputsFor(activeJob), undefined, false, { promptName });
+              persistReviewReport(tmpDir, promptName, {
+                modelLabel: activeJob.model.label, conclusion: result.conclusion, output: result.output,
+              });
+              return result;
+            },
             promptBudgetFor: (activeJob) => promptBudgetByKey.get(lensPromptKey(activeJob)),
             log: (message) => console.log(message),
             warn: (message) => console.warn(message),
@@ -896,6 +902,9 @@ async function run(): Promise<void> {
   }
 
   console.log(`── pi ${result.conclusion === "success" ? "completed" : "failed"} ──`);
+  persistReviewReport(tmpDir, "validator-final", {
+    modelLabel: activeModelLabel, conclusion: result.conclusion, output: result.output,
+  });
   const safeOutput = sanitize(result.output);
   const publicReview = preparePublicReviewOutput(result.output, result.conclusion, {
     internalModelLabels: modelLabelRedactionTerms([

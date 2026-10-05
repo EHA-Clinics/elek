@@ -129,6 +129,16 @@ export function applyExcludePaths(
  */
 export function modelInputBudgetChars(modelLabel: string): number {
   const normalized = modelLabel.toLowerCase();
+  // Verified OpenRouter 1M-context council snapshots. Keep unknown and other
+  // providers on the conservative default. The caller still reserves all
+  // discussion, reports and output headroom before packing the complete diff.
+  if (new Set([
+    "openrouter/z-ai/glm-5.3-flash",
+    "openrouter/xiaomi/mimo-v2.5-pro",
+    "xiaomi/mimo-v2.5-pro",
+    "openrouter/deepseek/deepseek-v4.1-flash",
+    "openrouter/deepseek/deepseek-v4-pro-0813",
+  ]).has(normalized)) return 1_200_000;
   if (/kimi[-_.]?k3/.test(normalized)) return 2_700_000;
   if (/gpt[-_.]?5[.-]?6/.test(normalized)) return 700_000;
   if (/glm[-_.]?5[.-]?2/.test(normalized)) return 540_000;

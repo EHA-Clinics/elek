@@ -77,7 +77,7 @@ describe("pinned Pi reasoning extension under Node", () => {
       expect(failover.failoverUsed).toBe(true);
       expect(failover.attemptMetrics.map((a) => a.reasoning?.effectiveControl)).toEqual(["provider-default", "named-effort"]);
       expect(failover.lensResult.conclusion).toBe("success");
-      expect(buildPiArgs({ ...inputs, openRouterReasoningModes: {} }, "/tmp/prompt", false).join(" ")).not.toContain("pi-openrouter-observe");
+      expect(buildPiArgs({ ...inputs, model: "openrouter/unknown/model", openRouterReasoningModes: {} }, "/tmp/prompt", false).join(" ")).not.toContain("pi-openrouter-observe");
       const off = await runPi("synthetic off", { ...inputs, thinking: "off" }, undefined, false, { promptName: "off" });
       expect(off.conclusion).toBe("success");
       expect(requests.at(-1)?.reasoning).toBeUndefined();

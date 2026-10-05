@@ -24,6 +24,7 @@ import { spawn } from "child_process";
 import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { writeRoutingConfig } from "./openrouter-routing.js";
+import { councilOutputLimit } from "./council-output.js";
 import { lookupGenerationRecord, isGenerationLookupApplicable } from "./openrouter-generation.js";
 import { reasoningBudgets,
   REASONING_MAX_TOKENS_ENV, REASONING_MODES_ENV, REASONING_THINKING_ENV, REASONING_TELEMETRY_PREFIX, REASONING_NOT_APPLICABLE,
@@ -1003,7 +1004,8 @@ function usesReadonlyReviewTools(inputs: ActionInputs): boolean {
 }
 
 function needsReasoningExtension(inputs: ActionInputs): boolean {
-  return inputs.reasoningMaxTokens !== undefined || Object.keys(inputs.openRouterReasoningModes ?? {}).length > 0;
+  return councilOutputLimit(inputs.provider, inputs.model) !== undefined ||
+    inputs.reasoningMaxTokens !== undefined || Object.keys(inputs.openRouterReasoningModes ?? {}).length > 0;
 }
 
 /**

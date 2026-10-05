@@ -1,0 +1,21 @@
+# Explicit draft-to-ready admission; pushes and ordinary comments spend no review calls.
+name: Infrastructure Council
+on:
+  pull_request:
+    types: [ready_for_review]
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: infrastructure-council-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  review:
+    uses: EHA-Clinics/.github/.github/workflows/ai-code-review.yml@d467a22c583e16a6c9d1d3c3c410875e7c29ffe6
+    with:
+      max_turns: 45
+      job_timeout_minutes: 65
+      run_timeout_seconds: '900'
+      validator_run_timeout_seconds: '1200'
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

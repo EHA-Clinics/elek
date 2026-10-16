@@ -99,6 +99,12 @@ export interface ActionInputs {
   validatorModel: string;
   /** Optional thinking level for the final orchestrator/validator. */
   validatorThinking: string;
+  /**
+   * Optional single model the `validator-review` lane fails over to, ONCE, when
+   * its first attempt ends `invalid_output` (EHAC-2522). Undefined — the shipped
+   * default — keeps that class a blocking no-retry, exactly as before.
+   */
+  validatorReviewFailoverModel?: string;
   /** Optional prompt-level severity threshold for reported findings. */
   severityThreshold: "" | "critical" | "important" | "minor";
   /** Show estimated review cost in logs, outputs, and comments. */

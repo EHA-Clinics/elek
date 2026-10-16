@@ -59,6 +59,7 @@ import {
   buildSynthesisPrompt,
   resolveReviewPlan,
   resolveReviewPlanSupport,
+  resolveValidatorReviewFailoverModel,
   selectReviewPlanWithinBudget,
   type DiffPromptBudgetReport,
   type ModelSpec,
@@ -167,6 +168,9 @@ async function run(): Promise<void> {
   const budget = assessSerialBudget({
     runTimeoutSeconds: parsedInputs.runTimeoutSeconds,
     validatorRunTimeoutSeconds: parsedInputs.validatorRunTimeoutSeconds,
+    // The pinned invalid_output failover is a second validator-review attempt the
+    // guard must count (EHAC-2522).
+    validatorReviewFailoverConfigured: parsedInputs.validatorReviewFailoverModel !== undefined,
     jobTimeoutMinutes: parsedInputs.jobTimeoutMinutes,
   });
   if (reportSerialBudget(budget, core) === "abort") {
@@ -662,6 +666,9 @@ async function run(): Promise<void> {
     // NOT in it: the advisor is an independent audit, and swapping a stalled
     // reviewer onto it would collapse two nominally independent opinions into one.
     const reviewerRoster: ModelSpec[] = reviewPlan.jobs.map((j) => j.model);
+    // The caller-pinned validator-review failover for invalid_output ONLY
+    // (EHAC-2522). Undefined unless the caller set it; never the roster.
+    const validatorReviewFailoverModel = resolveValidatorReviewFailoverModel(inputs);
 
     const lensInputsFor = (job: ReviewJob) => ({
       ...piInputs,
@@ -690,6 +697,10 @@ async function run(): Promise<void> {
         //   provider_transient                 -> same model
         //   timeout and everything else        -> no retry, fail closed
         //
+        // The validator-review lane is narrower: provider_unavailable -> next
+        // distinct roster model; invalid_output -> the pinned
+        // validator_review_failover_model when one is set (EHAC-2522); nothing else.
+        //
         // `timeout` was moved to no-retry after measurement: eha_care #3680 run
         // 32105023640 issued four timeout retries on four DIFFERENT models and three
         // timed out again, because a wall-clock overrun is a property of the PROMPT.
@@ -700,6 +711,7 @@ async function run(): Promise<void> {
         const execution = await executeLensWithRetry({
           job,
           roster: reviewerRoster,
+          validatorReviewFailoverModel,
           deps: {
             // The prompt and the pi inputs are built FROM the job handed back, so
             // a substituted model gets its own prompt label and its own diff

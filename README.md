@@ -321,6 +321,7 @@ Full architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | `advisor_thinking` | _(validator/reviewer setting)_ | Advisor thinking level; falls back to `validator_thinking`, then `thinking` |
 | `validator_model` | _(primary model)_ | Final orchestrator model spec; this model validates reviewer reports and posts findings |
 | `validator_thinking` | _(same as `thinking`)_ | VALIDATOR-ROLES thinking level: the final synthesis AND (when `advisor_thinking` is unset) the validator-review audit lens; use `medium` for frontier orchestrators when reviewers use high/max. Set `advisor_thinking` to decouple the audit lens |
+| `validator_review_failover_model` | _(unset: no failover)_ | ONE model the validator-review audit lens fails over to, once, when its first attempt ends `invalid_output`; `timeout`/`stall`/`max_turns` never fail over on that lane. Setting it makes the serial budget guard count the second attempt (`setup + 3 x run_timeout_seconds` when `validator_run_timeout_seconds` is unset) |
 | `severity_threshold` | _(.elek.yml or unset)_ | Prompt-level reviewer threshold: `critical`, `important`, or `minor` |
 | `show_cost` | `true` | Show estimated token usage and review cost in comments/logs; outputs are always set |
 | `cost_rates` | _(empty)_ | Optional price overrides as `model=inputPerMillion:outputPerMillion` |

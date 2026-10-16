@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `validator_review_failover_model` (EHAC-2522): an optional, single, caller-pinned
+  model the `validator-review` audit lens fails over to ONCE when its first attempt
+  ends `invalid_output`. eha_care #4710 (run 38797605889) breached its council when
+  the audit lens returned unusable output after 470.6s and four successful lenses
+  were discarded. Empty (the default) keeps `invalid_output` a blocking no-retry on
+  that lane, byte-identical to before; `timeout`, `stall` and `max_turns` stay
+  non-retryable there whatever it is set to, and a pinned model with the same
+  identity as the failed one is refused. The serial-budget guard counts the extra
+  attempt: with the failover set and `validator_run_timeout_seconds` unset it asserts
+  `setup + 3 x run_timeout_seconds` instead of `setup + 2 x`.
 - `validator_run_timeout_seconds` (EHAC-2833): a wall-clock budget for the
   VALIDATOR roles — the `validator-review` audit lens and the final synthesis —
   separate from the reviewer `run_timeout_seconds`. Empty (the default) inherits

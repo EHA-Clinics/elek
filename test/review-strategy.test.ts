@@ -17,6 +17,10 @@ import {
   normalizeModelIdentity,
   FAILURE_RETRY_POLICY,
   MAX_LENS_ATTEMPTS,
+  costEstimateLensJobs,
+  type ModelSpec,
+  type ReviewJob,
+  type ReviewPlan,
 } from "../src/review/strategy";
 import type { GitHubData } from "../src/github/data";
 import type { ActionInputs } from "../src/types";
@@ -769,6 +773,9 @@ describe("selectFailoverModel", () => {
 
 describe("resolveLensRetry", () => {
   const base = { role: "reviewer" as const, conclusion: "failure" as const, attemptsSoFar: 1, assignedModel: PRO, roster: ROSTER };
+  // eha_care's on-demand caller: R=900, V=1200, job cap 65 min, the first attempt timed
+  // out at ~900s after ~5s of setup inside the action.
+  const BUDGET = { runTimeoutSeconds: 900, validatorSeconds: 1200, jobTimeoutMinutes: 65, elapsedSeconds: 905 };
 
   it("moves stall, max_turns and invalid_output to the next distinct model", () => {
     for (const failureClass of ["stall", "max_turns", "invalid_output"] as const) {
@@ -801,22 +808,56 @@ describe("resolveLensRetry", () => {
     expect(decision.model!.label).toBe(PRO.label);
   });
 
-  it("never retries a timeout — a wall-clock overrun is a property of the PROMPT", () => {
-    // FALSIFIED BY MEASUREMENT, not reasoned: eha_care #3680 run 32105023640 issued
-    // four timeout retries on four DIFFERENT models; three timed out again and the
-    // fourth returned invalid_output. Every failing attempt was streaming
-    // continuously, so none of it was a stall. Moving models cannot fix a prompt
-    // that does not fit the budget — it just spends a second budget proving it.
-    const decision = resolveLensRetry({ ...base, failureClass: "timeout" });
-    expect(decision.retry).toBe(false);
-    expect(decision.reason).toContain('failure class "timeout" is not retried');
+  it("retries a timeout ONCE on the next distinct model, with a shorter per-attempt budget", () => {
+    // Owner ruling 4 (2026-10-16), on census data: 39 timeout attempts in 682 council
+    // records (2026-10-06..16), 35 of them xiaomi/mimo-v2.5-pro on the design lens, every
+    // one a FIRST attempt at exactly 900s and never retried, while the other lenses of the
+    // same runs finished (median ~300s). The overrun was the model's, not the prompt's,
+    // which reverses the EHAC-2231 no-retry rule drawn from eha_care #3680.
+    const decision = resolveLensRetry({ ...base, failureClass: "timeout", timeoutBudget: BUDGET });
+    expect(decision.retry).toBe(true);
+    expect(decision.failover).toBe(true);
+    expect(decision.model!.label).toBe(MIMO.label);
+    // min(floor(900 / 2), 65 x 60 - 37 - 905 - 1200 - 60) = min(450, 1698)
+    expect(decision.runTimeoutSeconds).toBe(450);
+    expect(decision.reason).toContain("450s");
 
-    // PAIRED DIRECTION: stall, which IS model-specific, still moves models. If this
-    // ever goes false too, the failover mechanism has been switched off wholesale
-    // rather than narrowed.
-    const stall = resolveLensRetry({ ...base, failureClass: "stall" });
+    // PAIRED DIRECTION: stall still moves models, and carries NO per-attempt override,
+    // so the shorter budget is a timeout-only property.
+    const stall = resolveLensRetry({ ...base, failureClass: "stall", timeoutBudget: BUDGET });
     expect(stall.retry).toBe(true);
     expect(stall.failover).toBe(true);
+    expect(stall.runTimeoutSeconds).toBeUndefined();
+  });
+
+  it("does not retry a timeout when no retry budget can be proven: it fails closed", () => {
+    const unset = resolveLensRetry({
+      ...base,
+      failureClass: "timeout",
+      timeoutBudget: { ...BUDGET, jobTimeoutMinutes: undefined },
+    });
+    expect(unset.retry).toBe(false);
+    expect(unset.reason).toContain("job_timeout_minutes");
+
+    // No budget handed over at all is the same as an unset cap.
+    expect(resolveLensRetry({ ...base, failureClass: "timeout" }).retry).toBe(false);
+
+    // 3900 - 37 - 2500 - 1200 - 60 = 103s left, below the 120s floor.
+    const tight = resolveLensRetry({ ...base, failureClass: "timeout", timeoutBudget: { ...BUDGET, elapsedSeconds: 2500 } });
+    expect(tight.retry).toBe(false);
+    expect(tight.reason).toContain("120s");
+  });
+
+  it("validator-review timeout is still not retried", () => {
+    // Its failure blocks at any tolerance and it carries the validator budget already.
+    const decision = resolveLensRetry({
+      ...base,
+      role: "validator-review",
+      failureClass: "timeout",
+      timeoutBudget: BUDGET,
+    });
+    expect(decision.retry).toBe(false);
+    expect(decision.runTimeoutSeconds).toBeUndefined();
   });
 
   it("never retries permanent, process or unclassified failures", () => {
@@ -841,9 +882,9 @@ describe("resolveLensRetry", () => {
 
   it("permits exactly ONE outer retry, never a hidden third attempt", () => {
     expect(MAX_LENS_ATTEMPTS).toBe(2);
-    // ...and for `timeout` the effective bound is ONE attempt, not two, which is
-    // what brings the serial worst case back under the job cap.
-    expect(FAILURE_RETRY_POLICY.timeout.retry).toBe(false);
+    expect(FAILURE_RETRY_POLICY.timeout).toEqual({ retry: true, target: "next-distinct-model" });
+    // A second timeout never earns a third attempt.
+    expect(resolveLensRetry({ ...base, failureClass: "timeout", attemptsSoFar: 2, timeoutBudget: BUDGET }).retry).toBe(false);
     expect(resolveLensRetry({ ...base, failureClass: "stall", attemptsSoFar: 1 }).retry).toBe(true);
     expect(resolveLensRetry({ ...base, failureClass: "stall", attemptsSoFar: 2 }).retry).toBe(false);
     expect(resolveLensRetry({ ...base, failureClass: "provider_transient", attemptsSoFar: 2 }).retry).toBe(false);
@@ -904,6 +945,32 @@ describe("resolveLensRetry", () => {
         { job: { lens: { id: "risk", title: "R", focus: "f" }, role: "reviewer" }, conclusion: "failure" },
       ]),
     ).toEqual(["risk"]);
+  });
+});
+
+describe("max_cost_usd estimate prices ONE extra reviewer attempt (ruling 4)", () => {
+  const reviewer = (id: string, model: ModelSpec): ReviewJob => ({
+    lens: { id, title: id, focus: id },
+    model,
+    role: "reviewer",
+  });
+  const jobs = [reviewer("risk", PRO), reviewer("design", MIMO), reviewer("tests", FLASH)];
+  const plan: Pick<ReviewPlan, "jobs" | "validatorReview"> = { jobs, validatorReview: undefined };
+  // A per-model price for one attempt on its own prompt. PRO is the most expensive.
+  const PRICE: Record<string, number> = { [PRO.label]: 3, [MIMO.label]: 2, [FLASH.label]: 1 };
+  const priceOf = (job: ReviewJob) => PRICE[job.model.label] ?? 0;
+
+  it("adds exactly one attempt: the most expensive next-distinct-model replacement", () => {
+    const estimated = costEstimateLensJobs(plan, undefined, priceOf);
+    expect(estimated).toHaveLength(jobs.length + 1);
+    // Replacements: risk PRO -> MIMO (2), design MIMO -> FLASH (1), tests FLASH -> PRO (3).
+    expect(estimated.at(-1)).toEqual({ ...jobs[2], model: PRO });
+    expect(estimated.slice(0, jobs.length)).toEqual(jobs);
+  });
+
+  it("adds nothing when the roster offers no distinct replacement", () => {
+    const single = { jobs: [reviewer("risk", PRO), reviewer("tests", PRO)], validatorReview: undefined };
+    expect(costEstimateLensJobs(single, undefined, priceOf)).toEqual(single.jobs);
   });
 });
 

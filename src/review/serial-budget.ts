@@ -10,11 +10,15 @@
  *
  * where the DOUBLE cap is the reach of the ONE permitted outer retry
  * (`MAX_LENS_ATTEMPTS = 2`): an attempt plus a failover on the worst job in the
- * wave, then the final synthesis after the wave drains. `timeout` never retries
- * (falsified at eha_care #3680), so the realistic bound is a single cap per
- * phase — but the guard asserts the retry-reachable bound, because a retry is
- * exactly the thing a future change re-enables and a green guard must not be
- * quietly understating the ceiling it claims to have checked.
+ * wave, then the final synthesis after the wave drains. The guard asserts that
+ * retry-reachable bound, because a green guard must not quietly understate the
+ * ceiling it claims to have checked.
+ *
+ * A reviewer `timeout` retries once since owner ruling 4 (2026-10-16), on a
+ * SHORTER per-attempt budget from `resolveTimeoutRetrySeconds` below: at most
+ * R/2, so it always fits the 2R allowance asserted here, and never more than the
+ * live clock leaves before the validator, so it cannot push the job past its cap.
+ * This pre-run guard is therefore unchanged by it.
  *
  * EHAC-2522 is that re-enable for the validator-review lane: a pinned
  * `validator_review_failover_model` retries `invalid_output`, a class that can
@@ -158,6 +162,57 @@ export function assessSerialBudget({
       `${formula} ` +
       `= ${required}s <= ${jobTimeoutMinutes} x 60 = ${capSeconds}s${failoverNote}.`,
   };
+}
+
+/** Safety margin kept free after a timeout retry and the validator. */
+export const TIMEOUT_RETRY_MARGIN_SECONDS = 60;
+/** A timeout retry shorter than this is not worth starting: it fails closed instead. */
+export const TIMEOUT_RETRY_MIN_SECONDS = 120;
+
+export interface TimeoutRetryBudgetInput {
+  /** R: the reviewer per-run cap the timed-out attempt had. */
+  runTimeoutSeconds: number;
+  /** V: the resolved validator budget (`V ?? R`); undefined means R. */
+  validatorSeconds?: number;
+  /** The job's own cap; undefined when the caller does not pass `job_timeout_minutes`. */
+  jobTimeoutMinutes: number | undefined;
+  /** Wall clock already spent inside the action, from its start. */
+  elapsedSeconds: number;
+  setupSeconds?: number;
+  marginSeconds?: number;
+  minSeconds?: number;
+}
+
+/**
+ * The per-attempt wall clock for the ONE timeout retry (owner ruling 4, EHAC-2844).
+ *
+ *   T2 = min(floor(R / 2), jobTimeoutMinutes x 60 - setup - elapsed - V - margin)
+ *
+ * The second term is what the job can still afford: the final synthesis (V) and a
+ * margin must still fit after the retry. Returns undefined, meaning NO retry, when
+ * the job cap is unknown (nothing can be proven to fit) or T2 is below
+ * `minSeconds`. Pure; the caller supplies `elapsedSeconds` from its own clock.
+ *
+ * Evidence: 39 timeout attempts in 682 council records (2026-10-06..16), 35 of them
+ * xiaomi/mimo-v2.5-pro on the design lens, all FIRST attempts at exactly 900s and
+ * never retried, while the other lenses of the same runs finished (median ~300s).
+ */
+export function resolveTimeoutRetrySeconds({
+  runTimeoutSeconds,
+  validatorSeconds,
+  jobTimeoutMinutes,
+  elapsedSeconds,
+  setupSeconds = SETUP_SECONDS,
+  marginSeconds = TIMEOUT_RETRY_MARGIN_SECONDS,
+  minSeconds = TIMEOUT_RETRY_MIN_SECONDS,
+}: TimeoutRetryBudgetInput): number | undefined {
+  if (jobTimeoutMinutes === undefined) return undefined;
+  const v = validatorSeconds ?? runTimeoutSeconds;
+  if (![runTimeoutSeconds, v, jobTimeoutMinutes, elapsedSeconds].every(Number.isFinite)) return undefined;
+  const half = Math.floor(runTimeoutSeconds / 2);
+  const remaining = Math.floor(jobTimeoutMinutes * 60 - setupSeconds - elapsedSeconds - v - marginSeconds);
+  const t2 = Math.min(half, remaining);
+  return t2 >= minSeconds ? t2 : undefined;
 }
 
 /**

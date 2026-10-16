@@ -80,7 +80,7 @@ import {
   type ReviewAttemptMetric,
   type ReviewRunMetric,
 } from "../review/summary.js";
-import { executeLensWithRetry } from "../review/lens-execution.js";
+import { executeLensWithRetry, type LensAttemptOverrides } from "../review/lens-execution.js";
 import { resolveRoleTimeouts } from "../review/role-timeouts.js";
 import {
   evaluateCouncilPolicy,
@@ -541,13 +541,16 @@ async function run(): Promise<void> {
     if (plan.strategy === "solo") return [];
 
     const reviewerJobs = plan.validatorReview ? [...plan.jobs, plan.validatorReview] : plan.jobs;
-    // Prices the pinned validator-review failover attempt too, at its own model's
-    // rates, so max_cost_usd cannot be exceeded by an attempt it never saw.
-    const lensCosts = costEstimateLensJobs(plan, validatorReviewFailoverModel).map((job) => estimatePromptOnlyCost({
+    // Prices ONE extra reviewer attempt (the most expensive next-distinct-model
+    // replacement, ruling 4) and the pinned validator-review failover attempt, each
+    // at its own model's rates on its own prompt, so max_cost_usd cannot be
+    // exceeded by an attempt it never saw.
+    const priceLensJob = (job: ReviewJob) => estimatePromptOnlyCost({
       modelLabel: job.model.label,
       prompt: lensPromptFor(job),
       costRates: inputs.costRates,
-    }));
+    });
+    const lensCosts = costEstimateLensJobs(plan, validatorReviewFailoverModel, (job) => priceLensJob(job).costUsd).map(priceLensJob);
     const synthesisCost = estimatePromptOnlyCost({
       modelLabel: plan.validator.label,
       prompt: buildSynthesisPrompt({
@@ -684,7 +687,7 @@ async function run(): Promise<void> {
     // reviewer onto it would collapse two nominally independent opinions into one.
     const reviewerRoster: ModelSpec[] = reviewPlan.jobs.map((j) => j.model);
 
-    const lensInputsFor = (job: ReviewJob) => ({
+    const lensInputsFor = (job: ReviewJob, overrides?: LensAttemptOverrides) => ({
       ...piInputs,
       provider: job.model.provider,
       model: job.model.model,
@@ -695,8 +698,11 @@ async function run(): Promise<void> {
       // carries the validator budget (EHAC-2833), not the reviewer's. Because
       // the failover replacement preserves `role` (lens-execution), a 404
       // failover resolves the SAME budget through the same role branch.
+      // A `timeout` retry (ruling 4) runs on the shorter budget the executor hands
+      // over; every other attempt keeps its role's budget.
       runTimeoutSeconds:
-        job.role === "validator-review" ? roleTimeouts.validatorReview : roleTimeouts.reviewer,
+        overrides?.runTimeoutSeconds ??
+        (job.role === "validator-review" ? roleTimeouts.validatorReview : roleTimeouts.reviewer),
       tools: lensTools,
       mode: "review",
     });
@@ -708,16 +714,21 @@ async function run(): Promise<void> {
         // WHAT that retry changes now depends on the terminal failure class:
         //
         //   stall / max_turns / invalid_output -> next distinct model
+        //   timeout                            -> next distinct model, on a SHORTER
+        //                                         budget (resolveTimeoutRetrySeconds)
         //   provider_transient                 -> same model
-        //   timeout and everything else        -> no retry, fail closed
+        //   everything else                    -> no retry, fail closed
         //
         // The validator-review lane is narrower: provider_unavailable -> next
         // distinct roster model; invalid_output -> the pinned
-        // validator_review_failover_model when one is set (EHAC-2522); nothing else.
+        // validator_review_failover_model when one is set (EHAC-2522); nothing else,
+        // timeout included.
         //
-        // `timeout` was moved to no-retry after measurement: eha_care #3680 run
-        // 32105023640 issued four timeout retries on four DIFFERENT models and three
-        // timed out again, because a wall-clock overrun is a property of the PROMPT.
+        // `timeout` retries again since owner ruling 4 (2026-10-16): 35 of 39 measured
+        // timeouts were mimo-v2.5-pro first attempts at 900s while the other lenses of
+        // the same runs finished, so the overrun was the model's. The retry gets at
+        // most R/2 and only what the live clock leaves before the validator; with
+        // job_timeout_minutes unset it does not happen at all.
         //
         // Re-sending a byte-identical prompt to a model that just hung is not a
         // retry, it is a second copy of the same failure — measured twice on
@@ -730,8 +741,15 @@ async function run(): Promise<void> {
             // The prompt and the pi inputs are built FROM the job handed back, so
             // a substituted model gets its own prompt label and its own diff
             // budget rather than inheriting the failed model's.
-            runAttempt: (activeJob, promptName) =>
-              runPi(lensPromptFor(activeJob), lensInputsFor(activeJob), undefined, false, { promptName }),
+            runAttempt: (activeJob, promptName, overrides) =>
+              runPi(lensPromptFor(activeJob), lensInputsFor(activeJob, overrides), undefined, false, { promptName }),
+            // Read when an attempt timed out: the live clock since the action started.
+            timeoutRetryBudget: () => ({
+              runTimeoutSeconds: roleTimeouts.reviewer,
+              validatorSeconds: roleTimeouts.validator,
+              jobTimeoutMinutes: parsedInputs.jobTimeoutMinutes,
+              elapsedSeconds: (Date.now() - actionStartedAt.getTime()) / 1000,
+            }),
             promptBudgetFor: (activeJob) => promptBudgetByKey.get(lensPromptKey(activeJob)),
             log: (message) => console.log(message),
             warn: (message) => console.warn(message),
@@ -750,9 +768,9 @@ async function run(): Promise<void> {
 
     for (const { job, activeJob, lensResult, attempts, failoverUsed } of lensRuns) {
       // Charge for EVERY attempt — a retry spends real money, and a cost report
-      // that hides it would understate the run. One retry can therefore exceed
-      // the pre-execution soft cost estimate; the bound is the attempt count, not
-      // the estimate.
+      // that hides it would understate the run. The pre-execution estimate prices
+      // ONE extra reviewer attempt (costEstimateLensJobs), so a run with retries on
+      // several lenses can still exceed it; the bound is the attempt count.
       for (const attempt of attempts) {
         runCosts.push(costFromPiResult(attempt));
       }

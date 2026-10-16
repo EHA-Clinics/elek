@@ -295,7 +295,9 @@ inputs:
       whatever this is set to, and a model with the same identity as the one
       that failed is refused. Setting it counts the failover in the serial
       budget guard: with validator_run_timeout_seconds unset the guard demands
-      `setup + 3 x run_timeout_seconds` instead of `setup + 2 x`. (EHAC-2522)
+      `setup + 3 x run_timeout_seconds` instead of `setup + 2 x`, and the
+      max_cost_usd pre-run estimate prices the failover attempt at this
+      model's rates. (EHAC-2522)
     required: false
     default: ""
   severity_threshold:

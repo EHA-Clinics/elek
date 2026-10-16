@@ -20,14 +20,18 @@ import { join } from "path";
 import { evaluateCouncilPolicy, type CouncilPolicyRun } from "../src/review/council-policy";
 import { executeLensWithRetry } from "../src/review/lens-execution";
 import { assessSerialBudget } from "../src/review/serial-budget";
+import { estimatePromptOnlyCost } from "../src/review/cost";
 import {
+  costEstimateLensJobs,
   resolveLensRetry,
   resolveValidatorReviewFailoverModel,
+  selectReviewPlanWithinBudget,
   type ModelSpec,
   type ReviewJob,
+  type ReviewPlan,
 } from "../src/review/strategy";
 import { parseValidatorReviewFailoverModelInput } from "../src/github/context";
-import type { PiFailureClass, PiRunResult } from "../src/types";
+import type { ActionInputs, PiFailureClass, PiRunResult } from "../src/types";
 
 const ADVISOR: ModelSpec = {
   provider: "openrouter",
@@ -289,6 +293,75 @@ describe("serial budget counts the validator-review failover (EHAC-2522)", () =>
   });
 });
 
+describe("max_cost_usd estimate counts the failover attempt (EHAC-2522)", () => {
+  const reviewer = (id: string): ReviewJob => ({
+    lens: { id, title: id, focus: id },
+    model: MIMO,
+    role: "reviewer",
+  });
+  const plan: ReviewPlan = {
+    strategy: "crosscheck",
+    jobs: [reviewer("risk"), reviewer("tests")],
+    validatorReview: auditJob,
+    validator: ADVISOR,
+    reusedModels: true,
+  };
+  // A fixed prompt per job; only the model and its rates vary between attempts.
+  const PROMPT = "x".repeat(400_000); // 100,000 estimated input tokens
+  const estimate = (pinned: ModelSpec | undefined) => (p: ReviewPlan) =>
+    costEstimateLensJobs(p, pinned).map((job) =>
+      estimatePromptOnlyCost({ modelLabel: job.model.label, prompt: PROMPT, costRates: "" }),
+    );
+
+  it("adds the pinned attempt, priced at the FAILOVER model's own rates", () => {
+    const without = estimate(undefined)(plan);
+    const withPinned = estimate(PINNED)(plan);
+
+    expect(withPinned).toHaveLength(without.length + 1);
+    const extra = withPinned[withPinned.length - 1];
+    expect(extra.modelLabel).toBe(PINNED.label);
+    // openai/gpt-5.5 builtin input rate is $5/M: 100,000 tokens = $0.50.
+    expect(extra.source).toBe("builtin");
+    expect(extra.costUsd).toBeCloseTo(0.5, 10);
+    expect(costEstimateLensJobs(plan, PINNED).at(-1)?.role).toBe("validator-review");
+  });
+
+  it("lets the cap see the attempt: a plan that fits without it is downgraded with it", () => {
+    const inputs = {
+      maxCostUsd: 0.3,
+      provider: "xiaomi",
+      model: "xiaomi/mimo-v2.5-pro",
+      reviewStrategy: "crosscheck",
+      reviewModels: "",
+      reviewLenses: "",
+      validatorModel: "",
+      advisorModel: "",
+    } as unknown as ActionInputs;
+    const ctx = { isPR: true, mode: "review" };
+    const fits = selectReviewPlanWithinBudget({ inputs, initialPlan: plan, supportContext: ctx, estimateCosts: estimate(undefined) });
+    const counted = selectReviewPlanWithinBudget({ inputs, initialPlan: plan, supportContext: ctx, estimateCosts: estimate(PINNED) });
+
+    expect(fits.plan.strategy).toBe("crosscheck");
+    expect(counted.plan.strategy).not.toBe("crosscheck");
+  });
+
+  it("an EMPTY input leaves the estimated job list exactly the planned wave", () => {
+    expect(costEstimateLensJobs(plan, undefined)).toEqual([...plan.jobs, auditJob]);
+    expect(JSON.stringify(estimate(undefined)(plan))).toBe(
+      JSON.stringify([...plan.jobs, auditJob].map((job) =>
+        estimatePromptOnlyCost({ modelLabel: job.model.label, prompt: PROMPT, costRates: "" }),
+      )),
+    );
+  });
+
+  it("does not count a failover that can never run", () => {
+    // No validator-review lane (advisor off), or a pinned model the decision refuses.
+    expect(costEstimateLensJobs({ ...plan, validatorReview: undefined }, PINNED)).toEqual(plan.jobs);
+    const sameIdentity: ModelSpec = { provider: "deepseek", model: "deepseek/deepseek-v4-pro-0813", label: "deepseek/deepseek-v4-pro-0813" };
+    expect(costEstimateLensJobs(plan, sameIdentity)).toHaveLength(3);
+  });
+});
+
 describe("orchestrator wiring (EHAC-2522)", () => {
   const run = readFileSync(join(import.meta.dir, "..", "src", "entrypoints", "run.ts"), "utf-8");
 
@@ -298,5 +371,11 @@ describe("orchestrator wiring (EHAC-2522)", () => {
       /assessSerialBudget\(\{[^}]*validatorReviewFailoverConfigured:\s*parsedInputs\.validatorReviewFailoverModel !== undefined/s,
     );
     expect(run).toContain("resolveValidatorReviewFailoverModel(inputs)");
+  });
+
+  it("prices the pre-run cost estimate through costEstimateLensJobs with the pinned model", () => {
+    expect(run).toMatch(
+      /const estimatePlannedInputCost = [\s\S]*?costEstimateLensJobs\(plan, validatorReviewFailoverModel\)\.map\(/,
+    );
   });
 });

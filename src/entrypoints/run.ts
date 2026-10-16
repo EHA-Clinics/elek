@@ -58,6 +58,7 @@ import {
   buildLensPrompt,
   buildSynthesisPrompt,
   resolveReviewPlan,
+  costEstimateLensJobs,
   resolveReviewPlanSupport,
   resolveValidatorReviewFailoverModel,
   selectReviewPlanWithinBudget,
@@ -521,12 +522,18 @@ async function run(): Promise<void> {
     return lensPrompt;
   };
 
+  // The caller-pinned validator-review failover for invalid_output ONLY
+  // (EHAC-2522). Undefined unless the caller set it; never the roster.
+  const validatorReviewFailoverModel = resolveValidatorReviewFailoverModel(inputs);
+
   const estimatePlannedInputCost = (plan: ReviewPlan): ReviewCost[] => {
     // Defensive only: the budget selector stops before estimating solo plans.
     if (plan.strategy === "solo") return [];
 
     const reviewerJobs = plan.validatorReview ? [...plan.jobs, plan.validatorReview] : plan.jobs;
-    const lensCosts = reviewerJobs.map((job) => estimatePromptOnlyCost({
+    // Prices the pinned validator-review failover attempt too, at its own model's
+    // rates, so max_cost_usd cannot be exceeded by an attempt it never saw.
+    const lensCosts = costEstimateLensJobs(plan, validatorReviewFailoverModel).map((job) => estimatePromptOnlyCost({
       modelLabel: job.model.label,
       prompt: lensPromptFor(job),
       costRates: inputs.costRates,
@@ -666,9 +673,6 @@ async function run(): Promise<void> {
     // NOT in it: the advisor is an independent audit, and swapping a stalled
     // reviewer onto it would collapse two nominally independent opinions into one.
     const reviewerRoster: ModelSpec[] = reviewPlan.jobs.map((j) => j.model);
-    // The caller-pinned validator-review failover for invalid_output ONLY
-    // (EHAC-2522). Undefined unless the caller set it; never the roster.
-    const validatorReviewFailoverModel = resolveValidatorReviewFailoverModel(inputs);
 
     const lensInputsFor = (job: ReviewJob) => ({
       ...piInputs,

@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-retryable there whatever it is set to, and a pinned model with the same
   identity as the failed one is refused. The serial-budget guard counts the extra
   attempt: with the failover set and `validator_run_timeout_seconds` unset it asserts
-  `setup + 3 x run_timeout_seconds` instead of `setup + 2 x`.
+  `setup + 3 x run_timeout_seconds` instead of `setup + 2 x`. The pre-run
+  `max_cost_usd` estimate also prices that attempt, at the failover model's own
+  rates on its own prompt, so a cost cap cannot be exceeded by an attempt the
+  estimate never saw; with the input empty the estimate is unchanged.
 - `validator_run_timeout_seconds` (EHAC-2833): a wall-clock budget for the
   VALIDATOR roles — the `validator-review` audit lens and the final synthesis —
   separate from the reviewer `run_timeout_seconds`. Empty (the default) inherits

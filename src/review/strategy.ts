@@ -459,6 +459,33 @@ export function resolveValidatorReviewFailoverModel(
   return raw ? parseModelSpec(raw, inputs) : undefined;
 }
 
+/**
+ * The lens attempts the pre-run `max_cost_usd` estimate prices (EHAC-2522).
+ *
+ * The planned wave, plus — only when a failover model is pinned, the plan has a
+ * validator-review lane, and the pinned model is one `resolveLensRetry` would
+ * actually move to — the pinned failover attempt, built as the replacement job
+ * the executor would run, so it is priced at the FAILOVER model's rates on its
+ * own prompt. Counting it is what stops a cap from being exceeded silently by an
+ * attempt the estimate never saw. With no pinned model the result is the planned
+ * wave unchanged.
+ */
+export function costEstimateLensJobs(
+  plan: Pick<ReviewPlan, "jobs" | "validatorReview">,
+  validatorReviewFailoverModel: ModelSpec | undefined,
+): ReviewJob[] {
+  const wave = plan.validatorReview ? [...plan.jobs, plan.validatorReview] : plan.jobs;
+  const audit = plan.validatorReview;
+  if (
+    !audit ||
+    !validatorReviewFailoverModel ||
+    normalizeModelIdentity(validatorReviewFailoverModel) === normalizeModelIdentity(audit.model)
+  ) {
+    return wave;
+  }
+  return [...wave, { ...audit, model: validatorReviewFailoverModel }];
+}
+
 export function parseReviewLensList(raw: string | undefined): ReviewLens[] {
   const ids = [...new Set(
     (raw || "")

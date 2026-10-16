@@ -368,9 +368,9 @@ describe("review summary", () => {
 describe("review summary: reviewed diff (U4)", () => {
   const HEAD = "a".repeat(40);
   const BASE = "b".repeat(40);
-  const summaryWith = (diffProvenance?: ReviewedDiffProvenance) =>
+  const summaryWith = (diffProvenance?: ReviewedDiffProvenance, ctx: GitHubEntityContext = context) =>
     buildReviewSummary({
-      context,
+      context: ctx,
       runId: "200",
       jobRunLink: "https://github.com/acme/app/actions/runs/200",
       conclusion: "success",
@@ -404,11 +404,22 @@ describe("review summary: reviewed diff (U4)", () => {
   });
 
   it("emits no key at all when no diff was read, and never borrows the event's SHAs", () => {
-    const entity = summaryWith(undefined).entity as Record<string, unknown>;
-    expect(entity).not.toHaveProperty("diffSource");
-    expect(entity).not.toHaveProperty("reviewedHeadSha");
-    expect(entity).not.toHaveProperty("reviewedBaseSha");
-    expect(JSON.stringify(entity)).not.toContain(String(context.pr?.headSha));
+    // The event SHAs must be VALID commit ids here: a placeholder like "abc" would be
+    // dropped by the SHA filter anyway, so a borrowing regression could not show.
+    const EVENT_HEAD = "c".repeat(40);
+    const EVENT_BASE = "d".repeat(40);
+    const eventContext: GitHubEntityContext = {
+      ...context,
+      pr: { ...context.pr!, headSha: EVENT_HEAD, baseSha: EVENT_BASE },
+    };
+    for (const provenance of [undefined, { diffSource: "api" as const }]) {
+      const entity = summaryWith(provenance, eventContext).entity as Record<string, unknown>;
+      expect(entity).not.toHaveProperty("reviewedHeadSha");
+      expect(entity).not.toHaveProperty("reviewedBaseSha");
+      expect(JSON.stringify(entity)).not.toContain(EVENT_HEAD);
+      expect(JSON.stringify(entity)).not.toContain(EVENT_BASE);
+    }
+    expect(summaryWith(undefined, eventContext).entity).not.toHaveProperty("diffSource");
   });
 
   it("drops a SHA that is not a full commit id instead of emitting a placeholder", () => {

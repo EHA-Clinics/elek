@@ -121,12 +121,16 @@ export interface ActionInputs {
  *
  * - `"remote"`: `git diff <base>...<head>` with the head taken from `origin/<head ref>`, verified
  *   equal to the PR head SHA elek resolved.
- * - `"head"`: the same, with the head taken from the checked-out `HEAD`, verified to contain the
- *   PR head SHA. `HEAD` may be a merge commit, so `reviewedHeadSha` is HEAD's own SHA.
+ * - `"head"`: the same, with the head taken from the checked-out `HEAD`: preferred when `HEAD` IS
+ *   the PR head; otherwise used only when no exact `origin/<head ref>` exists and `HEAD` contains the
+ *   PR head (a merge checkout, e.g. a fork PR), in which case `reviewedHeadSha` is the merge
+ *   commit's own SHA, because that is the tree that was diffed.
  * - `"api"`: GitHub's live PR diff (`pulls.get`, diff media type). It is bound to NO commit, so
  *   `reviewedHeadSha` and `reviewedBaseSha` are always absent for it.
  *
- * The SHAs are the exact commits passed to `git diff`, resolved immediately before it ran. They
+ * The SHAs are the exact commits passed to the three-dot `git diff <base>...<head>`, resolved
+ * immediately before it ran; git diffs from their merge-base, so `reviewedBaseSha` is the base TIP
+ * that was passed, not the merge-base (`git merge-base` of the two SHAs reproduces it). They
  * are never copied from the event payload or `pulls.get`, so a branch that moves during the job
  * cannot make the record name a tree that was not diffed.
  */
@@ -136,7 +140,7 @@ export interface ReviewedDiffProvenance {
   diffSource: ReviewedDiffSource;
   /** 40- or 64-hex commit elek diffed as the head. Absent when `diffSource` is `"api"`. */
   reviewedHeadSha?: string;
-  /** 40- or 64-hex commit elek diffed as the base tip. Absent when `diffSource` is `"api"`. */
+  /** 40- or 64-hex base tip passed to the three-dot diff. Absent when `diffSource` is `"api"`. */
   reviewedBaseSha?: string;
 }
 

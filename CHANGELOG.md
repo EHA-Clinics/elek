@@ -15,7 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `entity.reviewedBaseSha`, the exact commits passed to `git diff`, resolved when
   the diff is read. An `api` diff is bound to no commit, so it carries no SHA, and
   no key is ever filled from the event payload or a placeholder. Additive; `version`
-  stays 1 and no existing key or behaviour changes.
+  stays 1 and no existing key changes.
+- On a `pull_request` checkout (GitHub's synthetic `refs/pull/<n>/merge` commit) the
+  diff is now read from the exact PR head ref, `origin/<base>...origin/<head>`, when
+  that ref is present, instead of from the merge commit: the merge commit exists on no
+  branch, so a reviewed head recorded from it could never match the PR's branch tip,
+  and the coverage gate measures the same `origin/<base>...origin/<head>` diff. A
+  checkout that IS the PR head is unchanged; the merge commit remains the last resort
+  (e.g. a fork PR) and is then recorded as the reviewed head.
 
 - `validator_run_timeout_seconds` (EHAC-2833): a wall-clock budget for the
   VALIDATOR roles — the `validator-review` audit lens and the final synthesis —

@@ -211,7 +211,15 @@ export function readGitDiff(baseRef: string, headRef: string, headSha?: string):
   // jobs do not need persisted git credentials merely to build the diff. A
   // verified head SHA prevents comment/review events checked out on the
   // default branch from being mistaken for the PR checkout.
-  if (!headSha || refContainsCommit("HEAD", headSha)) {
+  //
+  // Order (U4): a ref that IS the PR head comes first. A pull_request checkout
+  // is GitHub's synthetic merge commit (refs/pull/<n>/merge): it CONTAINS the PR
+  // head but is not it, so recording it would name a commit that exists on no
+  // branch and could never match `origin/<head>`. When the exact remote head is
+  // present (any same-repo PR with fetch-depth: 0) it is diffed instead; the
+  // merge commit is only the last resort (e.g. a fork PR), recorded honestly as
+  // what was diffed.
+  if (!headSha || refEqualsCommit("HEAD", headSha)) {
     const localHeadDiff = diffCommits(`origin/${baseRef}`, "HEAD", "head");
     if (localHeadDiff !== undefined) return localHeadDiff;
   }
@@ -219,6 +227,11 @@ export function readGitDiff(baseRef: string, headRef: string, headSha?: string):
   if (!headSha || refEqualsCommit(`origin/${headRemoteRef}`, headSha)) {
     const localRemoteDiff = diffCommits(`origin/${baseRef}`, `origin/${headRemoteRef}`, "remote");
     if (localRemoteDiff !== undefined) return localRemoteDiff;
+  }
+
+  if (headSha && refContainsCommit("HEAD", headSha)) {
+    const mergeCheckoutDiff = diffCommits(`origin/${baseRef}`, "HEAD", "head");
+    if (mergeCheckoutDiff !== undefined) return mergeCheckoutDiff;
   }
 
   if (headSha) {

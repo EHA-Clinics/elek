@@ -124,11 +124,44 @@ describe("reviewed diff provenance (U4)", () => {
     }
   });
 
-  it("records the checked-out HEAD it diffed, not the event's PR head", () => {
-    // A pull_request checkout is a merge commit that CONTAINS the PR head. The
-    // tree elek diffed is the merge commit's, so that is the head it records.
+  it("on a pull_request merge checkout, diffs and records the exact PR head, not the merge commit", () => {
+    // A pull_request checkout is GitHub's synthetic merge commit: it CONTAINS the
+    // PR head but exists on no branch, so it can never equal origin/<head>. When the
+    // exact remote head is present it is what gets diffed and recorded.
     const repo = makeRepo();
     try {
+      repo.git("checkout", "-q", "-b", "pr-merge", repo.baseTipSha);
+      repo.git("merge", "-q", "--no-ff", "-m", "merge", repo.prSha);
+      const mergeSha = repo.git("rev-parse", "HEAD");
+
+      const data = fetchIn(repo.dir, {
+        headRef: "feature",
+        baseRef: "main",
+        headSha: repo.prSha,
+        baseSha: repo.eventBaseSha,
+      });
+
+      expect(mergeSha).not.toBe(repo.prSha);
+      expect(data.diffProvenance).toEqual({
+        diffSource: "remote",
+        reviewedHeadSha: repo.prSha,
+        reviewedBaseSha: repo.baseTipSha,
+      });
+      expect(data.diff).toBe(
+        execFileSync("git", ["diff", "origin/main...origin/feature"], { cwd: repo.dir, encoding: "utf-8" }),
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the merge commit, recorded as what was diffed, when no exact head ref exists", () => {
+    // A fork PR has no origin/<head>: the merge checkout is the only local tree that
+    // contains the PR head. elek diffs it and records the merge commit honestly, so a
+    // consumer comparing against the branch tip sees the mismatch instead of a borrowed SHA.
+    const repo = makeRepo();
+    try {
+      repo.git("update-ref", "-d", "refs/remotes/origin/feature");
       repo.git("checkout", "-q", "-b", "pr-merge", repo.baseTipSha);
       repo.git("merge", "-q", "--no-ff", "-m", "merge", repo.prSha);
       const mergeSha = repo.git("rev-parse", "HEAD");
@@ -146,6 +179,28 @@ describe("reviewed diff provenance (U4)", () => {
         reviewedBaseSha: repo.baseTipSha,
       });
       expect(mergeSha).not.toBe(repo.prSha);
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("records HEAD when the checkout IS the PR head", () => {
+    const repo = makeRepo();
+    try {
+      repo.git("checkout", "-q", "--detach", repo.prSha);
+
+      const data = fetchIn(repo.dir, {
+        headRef: "feature",
+        baseRef: "main",
+        headSha: repo.prSha,
+        baseSha: repo.eventBaseSha,
+      });
+
+      expect(data.diffProvenance).toEqual({
+        diffSource: "head",
+        reviewedHeadSha: repo.prSha,
+        reviewedBaseSha: repo.baseTipSha,
+      });
     } finally {
       rmSync(repo.dir, { recursive: true, force: true });
     }

@@ -211,6 +211,14 @@ export interface LensRetryDecision {
  * the remedy by definition, and the 2026-09-19 alias outage showed a dead
  * validator breaching every council in the fleet. `timeout` in particular stays
  * a no-retry there: it is a property of the prompt, not the model.
+ *
+ * EHAC-2522 adds ONE more opt-in case: `invalid_output` on the validator-review
+ * lane fails over ONCE to `validatorReviewFailoverModel` when the caller pinned
+ * one. eha_care #4710 (run 38797605889) lost four successful lenses because the
+ * audit lens returned unusable output after 470.6s; that is a property of the
+ * (model, prompt) pair, so a DIFFERENT pinned model is a real remedy. It does not
+ * draw from the reviewer roster, and with no pinned model the decision — reason
+ * string included — is exactly what it was before.
  */
 export function resolveLensRetry(params: {
   role?: ReviewJob["role"];
@@ -219,15 +227,40 @@ export function resolveLensRetry(params: {
   attemptsSoFar: number;
   assignedModel: ModelSpec;
   roster: readonly ModelSpec[];
+  /** The caller-pinned validator-review failover for `invalid_output` (EHAC-2522). */
+  validatorReviewFailoverModel?: ModelSpec;
 }): LensRetryDecision {
   const no = (reason: string): LensRetryDecision => ({ retry: false, failover: false, reason });
 
   if (params.conclusion !== "failure") return no("the attempt succeeded");
   const failureClass: PiFailureClass = params.failureClass ?? "unknown";
 
+  const pinned = params.validatorReviewFailoverModel;
+  if (params.role === "validator-review" && failureClass === "invalid_output" && pinned) {
+    if (params.attemptsSoFar >= MAX_LENS_ATTEMPTS) {
+      return no(`the retry budget of ${MAX_LENS_ATTEMPTS} attempt(s) is exhausted`);
+    }
+    // Re-sending the prompt that just produced unusable output to the same model
+    // is the byte-identical-retry anti-pattern this module exists to prevent.
+    if (normalizeModelIdentity(pinned) === normalizeModelIdentity(params.assignedModel)) {
+      return no(
+        `validator_review_failover_model ${pinned.label} is the model that just failed; ` +
+          "invalid_output requires a distinct model",
+      );
+    }
+    return {
+      retry: true,
+      model: pinned,
+      failover: true,
+      reason: `failure class "invalid_output" fails the validator-review lane over once to the pinned ${pinned.label}`,
+    };
+  }
   if (params.role === "validator-review" && failureClass !== "provider_unavailable") {
     return no(
-      "validator-review retries only on provider_unavailable; every other failure class is blocking either way",
+      pinned
+        ? "validator-review retries only on provider_unavailable and, with a pinned failover model, " +
+            "invalid_output; every other failure class is blocking either way"
+        : "validator-review retries only on provider_unavailable; every other failure class is blocking either way",
     );
   }
   if (params.attemptsSoFar >= MAX_LENS_ATTEMPTS) {
@@ -412,6 +445,45 @@ export function parseModelList(raw: string, defaults: Pick<ActionInputs, "provid
     .map((s) => s.trim())
     .filter(Boolean)
     .map((s) => parseModelSpec(s, defaults));
+}
+
+/**
+ * Resolve the pinned validator-review failover (EHAC-2522). An absent or blank
+ * value MUST stay undefined: `parseModelSpec("")` resolves to the primary model,
+ * and a failover nobody configured would silently change the policy outcome.
+ */
+export function resolveValidatorReviewFailoverModel(
+  inputs: Pick<ActionInputs, "provider" | "model" | "validatorReviewFailoverModel">,
+): ModelSpec | undefined {
+  const raw = inputs.validatorReviewFailoverModel?.trim();
+  return raw ? parseModelSpec(raw, inputs) : undefined;
+}
+
+/**
+ * The lens attempts the pre-run `max_cost_usd` estimate prices (EHAC-2522).
+ *
+ * The planned wave, plus — only when a failover model is pinned, the plan has a
+ * validator-review lane, and the pinned model is one `resolveLensRetry` would
+ * actually move to — the pinned failover attempt, built as the replacement job
+ * the executor would run, so it is priced at the FAILOVER model's rates on its
+ * own prompt. Counting it is what stops a cap from being exceeded silently by an
+ * attempt the estimate never saw. With no pinned model the result is the planned
+ * wave unchanged.
+ */
+export function costEstimateLensJobs(
+  plan: Pick<ReviewPlan, "jobs" | "validatorReview">,
+  validatorReviewFailoverModel: ModelSpec | undefined,
+): ReviewJob[] {
+  const wave = plan.validatorReview ? [...plan.jobs, plan.validatorReview] : plan.jobs;
+  const audit = plan.validatorReview;
+  if (
+    !audit ||
+    !validatorReviewFailoverModel ||
+    normalizeModelIdentity(validatorReviewFailoverModel) === normalizeModelIdentity(audit.model)
+  ) {
+    return wave;
+  }
+  return [...wave, { ...audit, model: validatorReviewFailoverModel }];
 }
 
 export function parseReviewLensList(raw: string | undefined): ReviewLens[] {

@@ -193,6 +193,33 @@ export function parseValidatorRunTimeoutSecondsInput(value: string): number | un
 }
 
 /**
+ * Parse `validator_review_failover_model`, FAILING CLOSED on a list.
+ *
+ * An EMPTY value is the SHIPPED DEFAULT and means "no invalid_output failover":
+ * the validator-review lane behaves exactly as it did before the input existed.
+ * It is deliberately NOT defaulted to the reviewer roster — that would change the
+ * policy outcome for every consumer that never asked for it.
+ *
+ * ONE model, pinned by the caller. A comma or whitespace means the caller typed a
+ * list, and silently taking its first entry (or the whole string as one bogus
+ * model id) would run the one blocking role on a model nobody chose. (EHAC-2522)
+ *
+ * @throws {Error} when the value is present and is not a single model spec.
+ */
+export function parseValidatorReviewFailoverModelInput(value: string): string | undefined {
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  if (/[\s,]/.test(normalized)) {
+    throw new Error(
+      `Invalid validator_review_failover_model input: "${normalized}". ` +
+        "Expected ONE model spec (e.g. openai/gpt-5.5), not a list. " +
+        "Refusing to run: the validator-review failover is a single pinned model.",
+    );
+  }
+  return normalized;
+}
+
+/**
  * Parse `reasoning_max_tokens`, FAILING CLOSED on anything unreadable.
  *
  * Same doctrine as the two safety parsers above. An EMPTY value is not a
@@ -278,6 +305,9 @@ export function parseInputs(): ActionInputs {
     advisorThinking: core.getInput("advisor_thinking") || "",
     validatorModel: core.getInput("validator_model") || "",
     validatorThinking: core.getInput("validator_thinking") || "",
+    validatorReviewFailoverModel: parseValidatorReviewFailoverModelInput(
+      core.getInput("validator_review_failover_model"),
+    ),
     severityThreshold: parseSeverityInput(core.getInput("severity_threshold")),
     showCost: parseBooleanInput(core.getInput("show_cost"), true),
     costRates: core.getInput("cost_rates") || "",

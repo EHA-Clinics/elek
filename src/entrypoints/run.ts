@@ -58,7 +58,9 @@ import {
   buildLensPrompt,
   buildSynthesisPrompt,
   resolveReviewPlan,
+  costEstimateLensJobs,
   resolveReviewPlanSupport,
+  resolveValidatorReviewFailoverModel,
   selectReviewPlanWithinBudget,
   type DiffPromptBudgetReport,
   type ModelSpec,
@@ -167,6 +169,9 @@ async function run(): Promise<void> {
   const budget = assessSerialBudget({
     runTimeoutSeconds: parsedInputs.runTimeoutSeconds,
     validatorRunTimeoutSeconds: parsedInputs.validatorRunTimeoutSeconds,
+    // The pinned invalid_output failover is a second validator-review attempt the
+    // guard must count (EHAC-2522).
+    validatorReviewFailoverConfigured: parsedInputs.validatorReviewFailoverModel !== undefined,
     jobTimeoutMinutes: parsedInputs.jobTimeoutMinutes,
   });
   if (reportSerialBudget(budget, core) === "abort") {
@@ -527,12 +532,18 @@ async function run(): Promise<void> {
     return lensPrompt;
   };
 
+  // The caller-pinned validator-review failover for invalid_output ONLY
+  // (EHAC-2522). Undefined unless the caller set it; never the roster.
+  const validatorReviewFailoverModel = resolveValidatorReviewFailoverModel(inputs);
+
   const estimatePlannedInputCost = (plan: ReviewPlan): ReviewCost[] => {
     // Defensive only: the budget selector stops before estimating solo plans.
     if (plan.strategy === "solo") return [];
 
     const reviewerJobs = plan.validatorReview ? [...plan.jobs, plan.validatorReview] : plan.jobs;
-    const lensCosts = reviewerJobs.map((job) => estimatePromptOnlyCost({
+    // Prices the pinned validator-review failover attempt too, at its own model's
+    // rates, so max_cost_usd cannot be exceeded by an attempt it never saw.
+    const lensCosts = costEstimateLensJobs(plan, validatorReviewFailoverModel).map((job) => estimatePromptOnlyCost({
       modelLabel: job.model.label,
       prompt: lensPromptFor(job),
       costRates: inputs.costRates,
@@ -700,6 +711,10 @@ async function run(): Promise<void> {
         //   provider_transient                 -> same model
         //   timeout and everything else        -> no retry, fail closed
         //
+        // The validator-review lane is narrower: provider_unavailable -> next
+        // distinct roster model; invalid_output -> the pinned
+        // validator_review_failover_model when one is set (EHAC-2522); nothing else.
+        //
         // `timeout` was moved to no-retry after measurement: eha_care #3680 run
         // 32105023640 issued four timeout retries on four DIFFERENT models and three
         // timed out again, because a wall-clock overrun is a property of the PROMPT.
@@ -710,6 +725,7 @@ async function run(): Promise<void> {
         const execution = await executeLensWithRetry({
           job,
           roster: reviewerRoster,
+          validatorReviewFailoverModel,
           deps: {
             // The prompt and the pi inputs are built FROM the job handed back, so
             // a substituted model gets its own prompt label and its own diff

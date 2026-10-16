@@ -286,6 +286,20 @@ inputs:
       should reason at a different level than the synthesis. (EHAC-2841)
     required: false
     default: ""
+  validator_review_failover_model:
+    description: >-
+      Optional ONE model spec the validator-review audit lens fails over to,
+      ONCE, when its first attempt ends invalid_output. Empty (default) keeps
+      invalid_output a blocking no-retry on that lane, byte-identical to before.
+      timeout, stall and max_turns stay non-retryable on the validator lane
+      whatever this is set to, and a model with the same identity as the one
+      that failed is refused. Setting it counts the failover in the serial
+      budget guard: with validator_run_timeout_seconds unset the guard demands
+      `setup + 3 x run_timeout_seconds` instead of `setup + 2 x`, and the
+      max_cost_usd pre-run estimate prices the failover attempt at this
+      model's rates. (EHAC-2522)
+    required: false
+    default: ""
   severity_threshold:
     description: "Prompt-level minimum finding severity to surface: critical, important, or minor. Empty uses .elek.yml or no threshold."
     required: false
@@ -413,6 +427,7 @@ runs:
         INPUT_ADVISOR_THINKING: ${{ inputs.advisor_thinking }}
         INPUT_VALIDATOR_MODEL: ${{ inputs.validator_model }}
         INPUT_VALIDATOR_THINKING: ${{ inputs.validator_thinking }}
+        INPUT_VALIDATOR_REVIEW_FAILOVER_MODEL: ${{ inputs.validator_review_failover_model }}
         INPUT_SEVERITY_THRESHOLD: ${{ inputs.severity_threshold }}
         INPUT_SHOW_COST: ${{ inputs.show_cost }}
         INPUT_COST_RATES: ${{ inputs.cost_rates }}

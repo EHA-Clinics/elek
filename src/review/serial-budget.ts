@@ -16,6 +16,11 @@
  * exactly the thing a future change re-enables and a green guard must not be
  * quietly understating the ceiling it claims to have checked.
  *
+ * EHAC-2522 is that re-enable for the validator-review lane: a pinned
+ * `validator_review_failover_model` retries `invalid_output`, a class that can
+ * arrive late (470.6s on eha_care #4710). Pinning it therefore switches the guard
+ * to the retry-aware formula even when the validator budget is unset.
+ *
  * and if that exceeds the job's own `timeout-minutes`, the runner cancels the job
  * mid-flight. A cancelled job loses the coverage record ENTIRELY — the required
  * check goes red with `verdict: UNKNOWN`, no findings, and nothing to action. That
@@ -59,6 +64,15 @@ export interface SerialBudgetInput {
    * the two configurations identical. (EHAC-2841)
    */
   validatorRunTimeoutSeconds?: number;
+  /**
+   * True when the caller pinned `validator_review_failover_model` (EHAC-2522).
+   * That failover is the retry-reachable second validator-review attempt made
+   * REAL for a slow class: #4710's invalid_output arrived after 470.6s, not in
+   * the seconds a 404 takes. So it switches the guard to the retry-aware formula
+   * even when `validatorRunTimeoutSeconds` is unset (V resolves to R: `setup +
+   * 3R`). Absent/false keeps every existing bound byte-identical.
+   */
+  validatorReviewFailoverConfigured?: boolean;
   /** Absent when the caller does not pass `job_timeout_minutes`. */
   jobTimeoutMinutes: number | undefined;
   setupSeconds?: number;
@@ -77,6 +91,7 @@ export interface SerialBudgetAssessment {
 export function assessSerialBudget({
   runTimeoutSeconds,
   validatorRunTimeoutSeconds,
+  validatorReviewFailoverConfigured = false,
   jobTimeoutMinutes,
   setupSeconds = SETUP_SECONDS,
 }: SerialBudgetInput): SerialBudgetAssessment {
@@ -90,12 +105,20 @@ export function assessSerialBudget({
   // input — it is the documented accepted residual, not a new gap this change
   // introduces.
   const validatorSeconds = validatorRunTimeoutSeconds ?? runTimeoutSeconds;
-  const required =
-    validatorRunTimeoutSeconds === undefined
-      ? setupSeconds + 2 * runTimeoutSeconds
-      : setupSeconds +
-        Math.max(2 * runTimeoutSeconds, 2 * validatorSeconds) +
-        validatorSeconds;
+  const legacy = validatorRunTimeoutSeconds === undefined && !validatorReviewFailoverConfigured;
+  const required = legacy
+    ? setupSeconds + 2 * runTimeoutSeconds
+    : setupSeconds + Math.max(2 * runTimeoutSeconds, 2 * validatorSeconds) + validatorSeconds;
+  const formulaWithUnits = legacy
+    ? `2 x ${runTimeoutSeconds}s`
+    : `max(2 x ${runTimeoutSeconds}s reviewer, 2 x ${validatorSeconds}s validator-review) + ${validatorSeconds}s validator`;
+  const formula = legacy
+    ? `2 x ${runTimeoutSeconds}`
+    : `max(2 x ${runTimeoutSeconds} reviewer, 2 x ${validatorSeconds} validator-review) + ${validatorSeconds} validator`;
+  // Said only when it applies, so an unconfigured caller's text is unchanged.
+  const failoverNote = validatorReviewFailoverConfigured
+    ? " (validator_review_failover_model is set, so the second validator-review attempt is counted)"
+    : "";
 
   if (jobTimeoutMinutes === undefined) {
     return {
@@ -103,7 +126,7 @@ export function assessSerialBudget({
       message:
         "Serial wall-clock budget NOT CHECKED: this caller does not pass `job_timeout_minutes`, " +
         `so elek cannot see the job cap it would be checked against. The serial worst case here is ` +
-        `${setupSeconds}s setup + ${validatorRunTimeoutSeconds === undefined ? `2 x ${runTimeoutSeconds}s` : `max(2 x ${runTimeoutSeconds}s reviewer, 2 x ${validatorSeconds}s validator-review) + ${validatorSeconds}s validator`} = ${required}s. ` +
+        `${setupSeconds}s setup + ${formulaWithUnits} = ${required}s${failoverNote}. ` +
         "Pass `job_timeout_minutes` from the caller to have this asserted. Until then a job cancelled " +
         "by the outer cap will lose its coverage record with no warning beyond this line.",
     };
@@ -120,7 +143,7 @@ export function assessSerialBudget({
         `  run_timeout_seconds : ${runTimeoutSeconds}\n` +
         `  validator_run_timeout_seconds : ${validatorRunTimeoutSeconds === undefined ? "(unset — inherits the reviewer budget)" : validatorSeconds}\n` +
         `  job_timeout_minutes : ${jobTimeoutMinutes}\n` +
-        `  serial worst case   : ${setupSeconds} + ${validatorRunTimeoutSeconds === undefined ? `2 x ${runTimeoutSeconds}` : `max(2 x ${runTimeoutSeconds} reviewer, 2 x ${validatorSeconds} validator-review) + ${validatorSeconds} validator`} = ${required}s\n` +
+        `  serial worst case   : ${setupSeconds} + ${formula} = ${required}s${failoverNote}\n` +
         `  job cap             : ${jobTimeoutMinutes} x 60 = ${capSeconds}s\n` +
         `  ${required}s > ${capSeconds}s\n` +
         "The validator runs AFTER the reviewer lenses, so two full per-run budgets can elapse back " +
@@ -132,8 +155,8 @@ export function assessSerialBudget({
     outcome: "pass",
     message:
       `Serial wall-clock budget checked: ${setupSeconds} + ` +
-      `${validatorRunTimeoutSeconds === undefined ? `2 x ${runTimeoutSeconds}` : `max(2 x ${runTimeoutSeconds} reviewer, 2 x ${validatorSeconds} validator-review) + ${validatorSeconds} validator`} ` +
-      `= ${required}s <= ${jobTimeoutMinutes} x 60 = ${capSeconds}s.`,
+      `${formula} ` +
+      `= ${required}s <= ${jobTimeoutMinutes} x 60 = ${capSeconds}s${failoverNote}.`,
   };
 }
 

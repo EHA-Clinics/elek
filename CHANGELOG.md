@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `validator_review_failover_model` (EHAC-2522): an optional, single, caller-pinned
+  model the `validator-review` audit lens fails over to ONCE when its first attempt
+  ends `invalid_output`. eha_care #4710 (run 38797605889) breached its council when
+  the audit lens returned unusable output after 470.6s and four successful lenses
+  were discarded. Empty (the default) keeps `invalid_output` a blocking no-retry on
+  that lane, byte-identical to before; `timeout`, `stall` and `max_turns` stay
+  non-retryable there whatever it is set to, and a pinned model with the same
+  identity as the failed one is refused. The serial-budget guard counts the extra
+  attempt: with the failover set and `validator_run_timeout_seconds` unset it asserts
+  `setup + 3 x run_timeout_seconds` instead of `setup + 2 x`. The pre-run
+  `max_cost_usd` estimate also prices that attempt, at the failover model's own
+  rates on its own prompt, so a cost cap cannot be exceeded by an attempt the
+  estimate never saw; with the input empty the estimate is unchanged.
 - The review summary names the diff elek actually reviewed (U4): `entity.diffSource`
   (`remote` = `origin/<base>...origin/<head>`, `head` = `origin/<base>...HEAD`,
   `api` = GitHub's live PR diff), plus `entity.reviewedHeadSha` and

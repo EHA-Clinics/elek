@@ -224,18 +224,23 @@ export function formatChangedFilesForPrompt(
     [overviewText, ...SLICE_INTRO, "", truncatedNote].join("\n").length +
     (omittedCount > 0 ? omittedFilesNote(omittedCount).length + 2 : 0);
 
+  const order = packingOrder(sorted, options.productionExtensions);
+  // An overview that leaves no room for even the first file's viable slice is
+  // bounded, so overview metadata never crowds out all diff evidence.
+  const firstBlockChars = minimumBlockChars(order[0].file);
   const sliceOverview =
-    framingChars(overview, files.length) > maxChars
-      ? boundedFileOverview(files, sorted, excludedNote, (text) => framingChars(text, files.length) <= maxChars)
+    framingChars(overview, files.length) + firstBlockChars > maxChars
+      ? boundedFileOverview(
+          files,
+          sorted,
+          excludedNote,
+          (text) => framingChars(text, files.length) + firstBlockChars <= maxChars,
+        )
       : overview;
 
-  let allocations = allocateFileSlices(sorted, maxChars - framingChars(sliceOverview, 0), options.productionExtensions);
+  let allocations = allocateFileSlices(order, maxChars - framingChars(sliceOverview, 0));
   if (allocations.size < files.length) {
-    allocations = allocateFileSlices(
-      sorted,
-      maxChars - framingChars(sliceOverview, files.length),
-      options.productionExtensions,
-    );
+    allocations = allocateFileSlices(order, maxChars - framingChars(sliceOverview, files.length));
   }
 
   // Blocks are emitted in priority order, as before; the size-ascending order
@@ -255,7 +260,10 @@ export function formatChangedFilesForPrompt(
   blocks.push("");
   blocks.push(truncatedNote);
 
-  // Backstop only: the allocation above already fits maxChars exactly.
+  // Backstop only: the allocation above already fits maxChars exactly whenever
+  // the minimum framing (overview heading, intro and notes, well under 1k) fits,
+  // which every caller's MIN_DIFF_PROMPT_CHARS floor guarantees. Below that
+  // there is no complete prompt to give, and this cut is the remaining bound.
   return blocks.join("\n").slice(0, maxChars);
 }
 
@@ -271,6 +279,28 @@ function omittedFilesNote(count: number): string {
 
 function fileBlockHeader(file: ChangedFilePatch): string {
   return `\n# ${file.path} (${file.status}, +${file.additions}/-${file.deletions})\n`;
+}
+
+interface PackingEntry {
+  file: ChangedFilePatch;
+  /** Position in comparator order; the deterministic tie-break. */
+  index: number;
+  tier: number;
+}
+
+/** Comparator-sorted files in budget order: by tier, live files before deletions. */
+function packingOrder(
+  sorted: readonly ChangedFilePatch[],
+  extraExtensions: readonly string[] | undefined,
+): PackingEntry[] {
+  return sorted
+    .map((file, index) => ({ file, index, tier: packingTier(file, extraExtensions) }))
+    .sort((a, b) => a.tier - b.tier || Number(a.file.status === "deleted") - Number(b.file.status === "deleted") || a.index - b.index);
+}
+
+/** Smallest block a file can be admitted with: its header, a viable slice, one joining newline. */
+function minimumBlockChars(file: ChangedFilePatch): number {
+  return fileBlockHeader(file).length + 1 + Math.min(file.patch.length, MIN_FILE_SLICE_CHARS);
 }
 
 /**
@@ -301,15 +331,7 @@ function fileBlockHeader(file: ChangedFilePatch): string {
  * every admitted file; a file whose allocation equals its patch length is
  * shown whole.
  */
-function allocateFileSlices(
-  sorted: readonly ChangedFilePatch[],
-  blockBudget: number,
-  extraExtensions: readonly string[] | undefined,
-): Map<ChangedFilePatch, number> {
-  const order = sorted
-    .map((file, index) => ({ file, index, tier: packingTier(file, extraExtensions) }))
-    .sort((a, b) => a.tier - b.tier || Number(a.file.status === "deleted") - Number(b.file.status === "deleted") || a.index - b.index);
-
+function allocateFileSlices(order: readonly PackingEntry[], blockBudget: number): Map<ChangedFilePatch, number> {
   const allocations = new Map<ChangedFilePatch, number>();
   let free = blockBudget;
   let exhausted = false;
@@ -317,10 +339,10 @@ function allocateFileSlices(
     let end = start;
     while (end < order.length && order[end].tier === order[start].tier) end++;
 
-    const admitted: Array<(typeof order)[number] & { cap: number }> = [];
+    const admitted: Array<PackingEntry & { cap: number }> = [];
     for (const entry of order.slice(start, end)) {
       const minimum = Math.min(entry.file.patch.length, MIN_FILE_SLICE_CHARS);
-      const cost = fileBlockHeader(entry.file).length + 1 + minimum;
+      const cost = minimumBlockChars(entry.file);
       if (cost > free) {
         exhausted = true;
         break;

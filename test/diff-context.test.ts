@@ -374,10 +374,10 @@ describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
    * maxChars and still ends with its closing note, so the final
    * slice(0, maxChars) backstop cut nothing.
    */
-  const expectBackstopUnused = (out: string, maxChars: number): void => {
+  const expectBackstopUnused = (out: string, maxChars: number, diff: string): void => {
     expect(out.length).toBeLessThanOrEqual(maxChars);
     const lastLine = out.slice(out.lastIndexOf("\n") + 1);
-    expect(lastLine.startsWith(TRUNCATED_NOTE_PREFIX)).toBe(true);
+    expect(lastLine).toBe(`${TRUNCATED_NOTE_PREFIX} reviewable diff was ${diff.length.toLocaleString("en-US")} characters.`);
   };
 
   it("shows a large source file WHOLE when the diff is just over budget (uniform cap cut it)", () => {
@@ -389,7 +389,7 @@ describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
 
     expect(out).toContain("# Representative diff slices");
     expect(out.includes(patchOf(diff, "src/engine.ts"))).toBe(true);
-    expectBackstopUnused(out, budget);
+    expectBackstopUnused(out, budget, diff);
   });
 
   it("fills tiers in order: every source file WHOLE, then tests ahead of docs", () => {
@@ -412,7 +412,7 @@ describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
     const testShown = ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"].map((path) => shownChars(out, patchOf(diff, path)));
     const docsShown = ["docs/a.md", "docs/b.md", "docs/c.md"].map((path) => shownChars(out, patchOf(diff, path)));
     expect(Math.min(...testShown)).toBeGreaterThan(Math.max(...docsShown) * 3);
-    expectBackstopUnused(out, budget);
+    expectBackstopUnused(out, budget, diff);
   });
 
   it("carries the slack of a file capped at MAX_FILE_SLICE_CHARS on to the next tier", () => {
@@ -425,7 +425,7 @@ describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
     expect(sourceShown).toBeGreaterThan(60_000);
     expect(sourceShown).toBeLessThanOrEqual(64_000);
     expect(out.includes(patchOf(diff, "test/huge.test.ts"))).toBe(true);
-    expectBackstopUnused(out, budget);
+    expectBackstopUnused(out, budget, diff);
   });
 
   it("admits the highest-priority files with viable slices and omits the lowest, never all", () => {
@@ -445,7 +445,7 @@ describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
     for (const path of shownTests) expect(shownChars(out, patchOf(diff, path))).toBeGreaterThanOrEqual(500);
     expect(out).not.toContain("diff --git a/docs/page-000.md");
     expect(out).toMatch(/# \.\.\. \d+ changed file\(s\) omitted from diff slices/);
-    expectBackstopUnused(out, budget);
+    expectBackstopUnused(out, budget, diff);
   });
 
   it("keeps a deleted production file in the source tier, ahead of docs, under a tight budget", () => {
@@ -458,7 +458,7 @@ describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
     expect(out).toContain("# src/legacy.ts (deleted");
     expect(out.includes(patchOf(diff, "src/legacy.ts"))).toBe(true);
     expect(promptPriority(parseUnifiedDiffFiles(diff).find((file) => file.path === "src/legacy.ts")!)).toBe(5);
-    expectBackstopUnused(out, budget);
+    expectBackstopUnused(out, budget, diff);
   });
 
   it("emits blocks in priority order, deletions last, whatever order the budget was shared in", () => {
@@ -495,7 +495,7 @@ describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
 
     expect(out.includes(`+${"A".repeat(10_000)}`)).toBe(true);
     expect(out).toContain("# ... file diff truncated");
-    expectBackstopUnused(out, budget);
+    expectBackstopUnused(out, budget, diff);
   });
 
   it("still trims an ordinary truncated slice back to a whole line", () => {
@@ -511,9 +511,10 @@ describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
     expect(patch[shown - 1]).toBe("\n");
   });
 
-  it("bounds the overview, by priority, when the overview alone would overflow the budget", () => {
+  it("bounds the overview, by priority, so it never crowds out the first file's slice", () => {
     const docs = Array.from({ length: 400 }, (_, i) => sizedDiff(`docs/a-very-long-directory-name/page-${String(i).padStart(4, "0")}.md`, 300));
     const diff = [...docs, sizedDiff("src/only-source.ts", 300)].join("\n");
+    // The floor every caller's budget is clamped to (MIN_DIFF_PROMPT_CHARS).
     const budget = 8_000;
 
     const out = formatChangedFilesForPrompt(diff, budget);
@@ -522,7 +523,13 @@ describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
     expect(out).toContain("# - src/only-source.ts (modified");
     expect(out).toMatch(/# \.\.\. and \d+ more changed file\(s\) not listed/);
     expect(out).not.toContain("page-0399.md");
-    expectBackstopUnused(out, budget);
+    expect(out.includes(patchOf(diff, "src/only-source.ts"))).toBe(true);
+    expectBackstopUnused(out, budget, diff);
+  });
+
+  it("still respects a budget below the minimum framing, through the backstop", () => {
+    const diff = [sizedDiff("src/a.ts", 2_000), sizedDiff("docs/a.md", 2_000)].join("\n");
+    expect(formatChangedFilesForPrompt(diff, 300).length).toBeLessThanOrEqual(300);
   });
 
   it("never needs the final backstop across budgets and diff shapes", () => {
@@ -536,7 +543,7 @@ describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
       ...Array.from({ length: 40 }, (_, i) => sizedDiff(`docs/n-${i}.md`, 800)),
     ].join("\n");
     for (let budget = 8_000; budget < diff.length; budget += 3_700) {
-      expectBackstopUnused(formatChangedFilesForPrompt(diff, budget), budget);
+      expectBackstopUnused(formatChangedFilesForPrompt(diff, budget), budget, diff);
     }
   });
 

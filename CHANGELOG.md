@@ -95,6 +95,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attempt metric records the shorter `runTimeoutSeconds` on the retry (additive), and
   the pre-run `max_cost_usd` estimate now prices ONE extra reviewer attempt: the most
   expensive next-distinct-model replacement, on its own prompt.
+- elek's own advisory self-review (`.github/workflows/elek.yml`) runs on two OpenRouter
+  models the account guardrail allows, `openrouter/deepseek/deepseek-v4.1-flash` and
+  `openrouter/xiaomi/mimo-v2.6-pro` (reasoning enabled, capped at 12000 tokens), both
+  through the org `OPENROUTER_API_KEY` (EHAC-2844, owner ruling 8). The direct-DeepSeek
+  lane is removed (its secret does not exist in this repo) and the kimi-k2.7-code lane is
+  replaced (blocked by the guardrail). No new secret.
 
 ### Security
 

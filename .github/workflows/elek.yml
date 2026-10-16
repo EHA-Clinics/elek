@@ -19,43 +19,15 @@ permissions:
   issues: write
 
 jobs:
-  # ── DeepSeek v4 Pro ───────────────────────────────────────────────────
-  deepseek:
-    name: "deepseek-v4-pro"
-    if: ${{ github.event.issue.pull_request && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) && !endsWith(github.actor, '[bot]') }}
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
-        with:
-          fetch-depth: 0
+  # Both lanes run on OpenRouter models the account guardrail allows, with the org
+  # OPENROUTER_API_KEY (owner ruling 8, EHAC-2844). The former direct-DeepSeek lane had
+  # no key in this repo ("No API key found for deepseek"), and kimi-k2.7-code is blocked
+  # by the guardrail (404 "0 endpoints"). Model ids keep the `openrouter/` prefix:
+  # without it pi resolves the native provider and fails with "No API key".
 
-      - name: Advisory elek review
-        id: review
-        uses: ./
-        continue-on-error: true
-        timeout-minutes: 12
-        with:
-          deepseek_api_key: ${{ secrets.DEEPSEEK_API_KEY }}
-          provider: deepseek
-          model: deepseek-v4-pro
-          thinking: high
-          branch_prefix: elek/deepseek/
-          prompt: |
-            Review this PR for correctness, security, performance, and style.
-            Be specific — reference files and line numbers. Think step by step.
-            Do not claim external GitHub Action versions are unpublished unless
-            this run failed while resolving them; by the time this prompt runs,
-            checkout and this composite action have already resolved.
-
-      - name: Report advisory review failure
-        if: steps.review.outcome == 'failure'
-        run: echo "::warning::Advisory DeepSeek review failed; inspect the tracking comment and run logs."
-
-  # ── OpenRouter Kimi K2.7 Code ────────────────────────────────────────
-  kimi:
-    name: "openrouter-kimi-k2.7-code"
+  # ── OpenRouter DeepSeek v4.1 Flash ───────────────────────────────────
+  deepseek-flash:
+    name: "openrouter-deepseek-v4.1-flash"
     if: ${{ github.event.issue.pull_request && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) && !endsWith(github.actor, '[bot]') }}
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -73,10 +45,10 @@ jobs:
         with:
           openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
           provider: openrouter
-          model: moonshotai/kimi-k2.7-code
-          thinking: medium
+          model: openrouter/deepseek/deepseek-v4.1-flash
+          thinking: high
           max_turns: 6
-          branch_prefix: elek/kimi/
+          branch_prefix: elek/deepseek-flash/
           prompt: |
             Review this PR for correctness, security, performance, and style.
             Be specific — reference files and line numbers. Think step by step.
@@ -86,4 +58,42 @@ jobs:
 
       - name: Report advisory review failure
         if: steps.review.outcome == 'failure'
-        run: echo "::warning::Advisory OpenRouter Kimi review failed; inspect the tracking comment and run logs."
+        run: echo "::warning::Advisory OpenRouter DeepSeek v4.1 Flash review failed; inspect the tracking comment and run logs."
+
+  # ── OpenRouter Xiaomi MiMo v2.6 Pro ──────────────────────────────────
+  mimo:
+    name: "openrouter-mimo-v2.6-pro"
+    if: ${{ github.event.issue.pull_request && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) && !endsWith(github.actor, '[bot]') }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Advisory elek review
+        id: review
+        uses: ./
+        continue-on-error: true
+        timeout-minutes: 12
+        with:
+          openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
+          provider: openrouter
+          model: openrouter/xiaomi/mimo-v2.6-pro
+          thinking: high
+          # mimo-v2.6-pro endpoints accept `reasoning` but not a named effort, so its
+          # reasoning is enabled with a token cap, as the council runs it.
+          openrouter_model_reasoning_modes: '{"xiaomi/mimo-v2.6-pro":{"mode":"enabled","max_tokens":12000}}'
+          max_turns: 6
+          branch_prefix: elek/mimo/
+          prompt: |
+            Review this PR for correctness, security, performance, and style.
+            Be specific — reference files and line numbers. Think step by step.
+            Do not claim external GitHub Action versions are unpublished unless
+            this run failed while resolving them; by the time this prompt runs,
+            checkout and this composite action have already resolved.
+
+      - name: Report advisory review failure
+        if: steps.review.outcome == 'failure'
+        run: echo "::warning::Advisory OpenRouter MiMo v2.6 Pro review failed; inspect the tracking comment and run logs."

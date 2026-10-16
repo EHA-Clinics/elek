@@ -22,6 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `max_cost_usd` estimate also prices that attempt, at the failover model's own
   rates on its own prompt, so a cost cap cannot be exceeded by an attempt the
   estimate never saw; with the input empty the estimate is unchanged.
+- The review summary names the diff elek actually reviewed (U4): `entity.diffSource`
+  (`remote` = `origin/<base>...origin/<head>`, `head` = `origin/<base>...HEAD`,
+  `api` = GitHub's live PR diff), plus `entity.reviewedHeadSha` and
+  `entity.reviewedBaseSha`, the exact commits passed to `git diff`, resolved when
+  the diff is read. An `api` diff is bound to no commit, so it carries no SHA, and
+  no key is ever filled from the event payload or a placeholder. Additive; `version`
+  stays 1 and no existing key changes.
+- On a `pull_request` checkout (GitHub's synthetic `refs/pull/<n>/merge` commit) the
+  diff is now read from the exact PR head ref, `origin/<base>...origin/<head>`, when
+  that ref is present, instead of from the merge commit: the merge commit exists on no
+  branch, so a reviewed head recorded from it could never match the PR's branch tip,
+  and the coverage gate measures the same `origin/<base>...origin/<head>` diff. A
+  checkout that IS the PR head is unchanged; the merge commit remains the last resort
+  (e.g. a fork PR) and is then recorded as the reviewed head.
+
 - `validator_run_timeout_seconds` (EHAC-2833): a wall-clock budget for the
   VALIDATOR roles — the `validator-review` audit lens and the final synthesis —
   separate from the reviewer `run_timeout_seconds`. Empty (the default) inherits
@@ -44,6 +59,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Diff slices are packed source-first and max-min fair (EHAC-2844). When a diff
+  exceeds its prompt budget, every file used to get the same uniform cap, so
+  the slack of small files went unused and tests and docs took budget that
+  production source needed: measured PR diffs 2.7k over budget used 61% of it
+  and still cut source. Budget now goes to tiers in priority order (production
+  source, including deleted source, then tests, config, docs and workflows),
+  shared max-min fairly within a tier with each file capped at 64k, after
+  admitting only files that can get a viable slice. Block overheads are exact,
+  an overview too large for the budget is bounded by priority, and a changed
+  line longer than its slice is shown as a prefix rather than dropped. The
+  full-diff regime is byte-identical.
 - Public review output no longer corrupts model labels. `redactInternalModelLabels`
   applied its terms sequentially, so a term applied after another had been
   substituted matched inside the fresh substitution, and a term that was a
@@ -55,6 +81,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   label only mis-attributed the synthesis.
 - In council mode the public model label is the VALIDATOR's — the model that
   writes the synthesis — not the primary `model` input, which is a reviewer lens.
+
+### Security
+
+- The review runtime is `@earendil-works/pi-coding-agent` 1.1.0 (was 0.84.2), with
+  every `@earendil-works/*` sibling (chord, pi-agent-core, pi-ai, pi-codemode, pi-mcp,
+  pi-tui, pi-telemetry) pinned to 1.1.0 through `overrides`: pi 1.0.1 dropped its
+  shrinkwrap and 1.1.0 declares caret ranges, which otherwise resolve the 1.3
+  libraries and break `MCP_TYPESCRIPT_PREAMBLE`. Also `@modelcontextprotocol/sdk`
+  1.31.0 and the `undici` 8.10.2 / `brace-expansion` 5.0.12 overrides. The runtime
+  audit (`npm audit --omit=dev --audit-level=high`) is clean: 0 high, 0 critical.
+- pi is started with `--no-approve` and `--no-mcp`, so a PR checkout's `.pi/*`
+  settings, MCP config or extensions are never loaded and pi's built-in MCP never
+  starts; the pinned local `pi-mcp-adapter` is still loaded explicitly when needed.
+- An empty `model` input now passes `--model <provider>/` (pi 1.0 rejects
+  `--provider` without `--model`); it still selects that provider's default model.
 
 ### Added
 

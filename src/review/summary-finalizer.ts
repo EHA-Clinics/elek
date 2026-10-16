@@ -100,6 +100,7 @@ export function createSummaryFinalizer(seed: Partial<ReviewSummaryInput> & {
         retriedLensIds: state.retriedLensIds ?? [],
         attempts: state.attempts ?? [],
         councilPolicy: state.councilPolicy,
+        diffProvenance: state.diffProvenance,
         terminalReason,
         ...(skipReason ? { skipReason } : {}),
         ...(failureMessage ? { failureMessage } : {}),

@@ -1,4 +1,9 @@
-import type { GitHubEntityContext, PiFailureClass, PiRunResult } from "../types.js";
+import type {
+  GitHubEntityContext,
+  PiFailureClass,
+  PiRunResult,
+  ReviewedDiffProvenance,
+} from "../types.js";
 import type { CouncilPolicyResult } from "./council-policy.js";
 import type { DiffPromptBudgetReport } from "./strategy.js";
 import type { ReviewCost, ReviewCostTotal } from "./cost.js";
@@ -154,6 +159,34 @@ export interface ReviewSummaryInput {
    * two independently-defaulted values happen to agree.
    */
   councilPolicy?: CouncilPolicyResult;
+  /**
+   * The diff elek actually reviewed (U4): its source and the commits it was built
+   * from, captured when the diff was read. Additive and optional, so `version`
+   * stays 1. Absent when no PR diff was read.
+   */
+  diffProvenance?: ReviewedDiffProvenance;
+}
+
+const COMMIT_SHA = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+
+/**
+ * `entity.diffSource` / `reviewedHeadSha` / `reviewedBaseSha`. Each key is emitted
+ * only when known: no provenance -> no keys; an `api` diff -> `diffSource` alone.
+ * A SHA is emitted only for a local diff and only when it is a full commit id, so
+ * an absent value never turns into a placeholder or a borrowed SHA.
+ */
+function reviewedDiffFields(provenance: ReviewedDiffProvenance | undefined) {
+  if (!provenance) return {};
+  if (provenance.diffSource === "api") return { diffSource: "api" as const };
+  return {
+    diffSource: provenance.diffSource,
+    ...(provenance.reviewedHeadSha && COMMIT_SHA.test(provenance.reviewedHeadSha)
+      ? { reviewedHeadSha: provenance.reviewedHeadSha }
+      : {}),
+    ...(provenance.reviewedBaseSha && COMMIT_SHA.test(provenance.reviewedBaseSha)
+      ? { reviewedBaseSha: provenance.reviewedBaseSha }
+      : {}),
+  };
 }
 
 export function metricFromPiRun(
@@ -235,6 +268,7 @@ export function buildReviewSummary(input: ReviewSummaryInput) {
       actor: input.context.actor,
       event: input.context.eventName,
       action: input.context.eventAction,
+      ...reviewedDiffFields(input.diffProvenance),
     },
     review: {
       mode: input.mode,

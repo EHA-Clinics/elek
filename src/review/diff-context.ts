@@ -216,43 +216,165 @@ export function formatChangedFilesForPrompt(
   }
 
   const sorted = [...files].sort(comparePromptPriorityWith(options.productionExtensions));
-  const remainingBudget = Math.max(0, maxChars - overview.length - 1_200);
-  const perFileBudget = Math.max(
-    MIN_FILE_SLICE_CHARS,
-    Math.min(MAX_FILE_SLICE_CHARS, Math.floor(remainingBudget / Math.max(1, Math.min(files.length, 40)))),
-  );
+  const truncatedNote = `# ... diff truncated by file for prompt budget; reviewable diff was ${keptDiff.length.toLocaleString("en-US")} characters.`;
+  // Every character outside the per-file blocks is a known string, so the
+  // patch budget is computed exactly instead of guessed. The omitted note is
+  // reserved at the widest count it can take, so it never overruns either.
+  const framingChars = (overviewText: string, omittedCount: number): number =>
+    [overviewText, ...SLICE_INTRO, "", truncatedNote].join("\n").length +
+    (omittedCount > 0 ? omittedFilesNote(omittedCount).length + 2 : 0);
 
-  const blocks: string[] = [
-    overview,
-    "",
-    "# Representative diff slices",
-    "# Slices are prioritized toward non-deleted production files so later application changes are not starved by early docs/workflow churn.",
-  ];
-  const included = new Set<string>();
-  let omitted = 0;
+  const sliceOverview =
+    framingChars(overview, files.length) > maxChars
+      ? boundedFileOverview(files, sorted, excludedNote, (text) => framingChars(text, files.length) <= maxChars)
+      : overview;
 
-  for (const file of sorted) {
-    const slice = slicePatch(file.patch, perFileBudget);
-    const header = `\n# ${file.path} (${file.status}, +${file.additions}/-${file.deletions})\n`;
-    const block = `${header}${slice}`;
-    const nextLength = blocks.join("\n").length + block.length + 240;
-    if (nextLength > maxChars) {
-      omitted++;
-      continue;
-    }
-    blocks.push(block);
-    included.add(file.path);
+  let allocations = allocateFileSlices(sorted, maxChars - framingChars(sliceOverview, 0), options.productionExtensions);
+  if (allocations.size < files.length) {
+    allocations = allocateFileSlices(
+      sorted,
+      maxChars - framingChars(sliceOverview, files.length),
+      options.productionExtensions,
+    );
   }
 
-  omitted = files.length - included.size;
+  // Blocks are emitted in priority order, as before; the size-ascending order
+  // used to share the budget is internal to the allocation.
+  const blocks: string[] = [sliceOverview, ...SLICE_INTRO];
+  for (const file of sorted) {
+    const allocation = allocations.get(file);
+    if (allocation === undefined) continue;
+    blocks.push(`${fileBlockHeader(file)}${slicePatch(file.patch, allocation)}`);
+  }
+
+  const omitted = files.length - allocations.size;
   if (omitted > 0) {
     blocks.push("");
-    blocks.push(`# ... ${omitted} changed file(s) omitted from diff slices; see the full file overview above and inspect files with read/grep/find/ls as needed.`);
+    blocks.push(omittedFilesNote(omitted));
   }
   blocks.push("");
-  blocks.push(`# ... diff truncated by file for prompt budget; reviewable diff was ${keptDiff.length.toLocaleString("en-US")} characters.`);
+  blocks.push(truncatedNote);
 
+  // Backstop only: the allocation above already fits maxChars exactly.
   return blocks.join("\n").slice(0, maxChars);
+}
+
+const SLICE_INTRO = [
+  "",
+  "# Representative diff slices",
+  "# Slices are prioritized toward non-deleted production files so later application changes are not starved by early docs/workflow churn.",
+];
+
+function omittedFilesNote(count: number): string {
+  return `# ... ${count} changed file(s) omitted from diff slices; see the full file overview above and inspect files with read/grep/find/ls as needed.`;
+}
+
+function fileBlockHeader(file: ChangedFilePatch): string {
+  return `\n# ${file.path} (${file.status}, +${file.additions}/-${file.deletions})\n`;
+}
+
+/**
+ * Decide how many patch characters each file gets in the SLICES regime.
+ *
+ * A uniform per-file cap left the slack of every small file unused and gave
+ * tests and docs the same share as production source, so source was cut in
+ * diffs whose source alone fit easily. Instead:
+ *
+ * Tiers are served in order (production source, then tests, config, docs and
+ * workflows, then deletions), and a tier only gets what the tiers before it
+ * left. Within a tier:
+ *
+ *   1. Admission: walk the tier in priority order and admit each file while it
+ *      can still get MIN_FILE_SLICE_CHARS (or its whole patch, if shorter) plus
+ *      its exact block overhead. The first file that does not fit and every
+ *      file after it, in this tier and below, are omitted, so the
+ *      lowest-priority files go first and some file is always shown when
+ *      anything can be.
+ *   2. Water-filling: the space left after those minimums is shared max-min
+ *      fairly over the admitted files (smallest patch first, each taking at
+ *      most an equal share of what is left), every file capped at
+ *      MAX_FILE_SLICE_CHARS. Whatever the tier does not use flows on to the
+ *      next.
+ *
+ * `blockBudget` is the space for the file blocks alone, each costing its
+ * header, its slice and one joining newline. Returns the slice allocation of
+ * every admitted file; a file whose allocation equals its patch length is
+ * shown whole.
+ */
+function allocateFileSlices(
+  sorted: readonly ChangedFilePatch[],
+  blockBudget: number,
+  extraExtensions: readonly string[] | undefined,
+): Map<ChangedFilePatch, number> {
+  const order = sorted
+    .map((file, index) => ({ file, index, tier: packingTier(file, extraExtensions) }))
+    .sort((a, b) => a.tier - b.tier || Number(a.file.status === "deleted") - Number(b.file.status === "deleted") || a.index - b.index);
+
+  const allocations = new Map<ChangedFilePatch, number>();
+  let free = blockBudget;
+  let exhausted = false;
+  for (let start = 0; start < order.length && !exhausted; ) {
+    let end = start;
+    while (end < order.length && order[end].tier === order[start].tier) end++;
+
+    const admitted: Array<(typeof order)[number] & { cap: number }> = [];
+    for (const entry of order.slice(start, end)) {
+      const minimum = Math.min(entry.file.patch.length, MIN_FILE_SLICE_CHARS);
+      const cost = fileBlockHeader(entry.file).length + 1 + minimum;
+      if (cost > free) {
+        exhausted = true;
+        break;
+      }
+      free -= cost;
+      allocations.set(entry.file, minimum);
+      admitted.push({ ...entry, cap: Math.min(entry.file.patch.length, MAX_FILE_SLICE_CHARS) });
+    }
+
+    admitted.sort((a, b) => a.cap - b.cap || a.index - b.index);
+    for (let i = 0; i < admitted.length; i++) {
+      const current = allocations.get(admitted[i].file) ?? 0;
+      const share = Math.floor(free / (admitted.length - i));
+      const extra = Math.max(0, Math.min(admitted[i].cap - current, share));
+      allocations.set(admitted[i].file, current + extra);
+      free -= extra;
+    }
+    start = end;
+  }
+  return allocations;
+}
+
+/**
+ * Budget tier of a file: its prompt priority, except that a deleted production
+ * file is still production source. It competes in the source tier (admitted
+ * after live source) rather than behind docs, as its priority would put it.
+ */
+function packingTier(file: ChangedFilePatch, extraExtensions: readonly string[] | undefined): number {
+  if (file.status === "deleted" && isProductionCode(file.path, extraExtensions)) return 0;
+  return promptPriority(file, extraExtensions);
+}
+
+/**
+ * The file overview cut to fit when, with the slice framing, it alone would
+ * exceed the budget: the highest-priority paths first, then a count of the rest.
+ */
+function boundedFileOverview(
+  files: readonly ChangedFilePatch[],
+  sorted: readonly ChangedFilePatch[],
+  excludedNote: string,
+  fits: (overviewText: string) => boolean,
+): string {
+  const build = (listed: number): string =>
+    [
+      fileOverviewHeading(files),
+      ...sorted.slice(0, listed).map(fileOverviewLine),
+      `# ... and ${files.length - listed} more changed file(s) not listed; the overview was bounded to fit the prompt budget.`,
+      excludedNote,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  let listed = 0;
+  while (listed < sorted.length && fits(build(listed + 1))) listed++;
+  return build(listed);
 }
 
 function parseDiffHeader(line: string): { oldPath: string; newPath: string } {
@@ -277,13 +399,17 @@ function countPatchChanges(patch: string): { additions: number; deletions: numbe
 }
 
 function formatFileOverview(files: ChangedFilePatch[]): string {
+  return [fileOverviewHeading(files), ...files.map(fileOverviewLine)].join("\n");
+}
+
+function fileOverviewHeading(files: readonly ChangedFilePatch[]): string {
   const totalAdditions = files.reduce((sum, file) => sum + file.additions, 0);
   const totalDeletions = files.reduce((sum, file) => sum + file.deletions, 0);
-  const lines = [
-    `# Changed file overview (${files.length} file${files.length === 1 ? "" : "s"}, +${totalAdditions}/-${totalDeletions})`,
-    ...files.map((file) => `# - ${file.path} (${file.status}, +${file.additions}/-${file.deletions})`),
-  ];
-  return lines.join("\n");
+  return `# Changed file overview (${files.length} file${files.length === 1 ? "" : "s"}, +${totalAdditions}/-${totalDeletions})`;
+}
+
+function fileOverviewLine(file: ChangedFilePatch): string {
+  return `# - ${file.path} (${file.status}, +${file.additions}/-${file.deletions})`;
 }
 
 function comparePromptPriorityWith(
@@ -358,8 +484,17 @@ function isTestCode(path: string): boolean {
 
 function slicePatch(patch: string, maxChars: number): string {
   if (patch.length <= maxChars) return patch;
-  const slice = patch.slice(0, Math.max(0, maxChars - 140)).replace(/\n[^\n]*$/, "");
+  const prefix = patch.slice(0, Math.max(0, maxChars - 140));
+  const lineTrimmed = prefix.replace(/\n[^\n]*$/, "");
+  // Trimming to a line boundary drops a changed line longer than the slice
+  // (a minified bundle, a source map), leaving only the file header. A partial
+  // changed line is still evidence; a slice with no changed line is not.
+  const slice = hasChangedContentLine(lineTrimmed) ? lineTrimmed : prefix;
   return `${slice}\n# ... file diff truncated; inspect this file directly if it is relevant.`;
+}
+
+function hasChangedContentLine(patchText: string): boolean {
+  return /^(?:\+(?!\+\+)|-(?!--))/m.test(patchText);
 }
 
 function fallbackTruncatedDiff(diff: string, maxChars: number): string {

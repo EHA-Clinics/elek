@@ -330,3 +330,277 @@ describe("priority_source_extensions (opt-in)", () => {
     expect(withOptIn).toContain("TF_TOKEN");
   });
 });
+
+describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
+  const TRUNCATED_NOTE_PREFIX = "# ... diff truncated by file for prompt budget;";
+
+  /** A unified diff for one file whose patch is about `chars` long. */
+  const sizedDiff = (path: string, chars: number, status: "modified" | "deleted" = "modified"): string => {
+    const sign = status === "deleted" ? "-" : "+";
+    const header =
+      status === "deleted"
+        ? [`diff --git a/${path} b/${path}`, "deleted file mode 100644", `--- a/${path}`, "+++ /dev/null", "@@ -1,9 +0,0 @@"]
+        : [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, "@@ -1,1 +1,9 @@", " context"];
+    const lines = [...header];
+    let length = lines.join("\n").length;
+    for (let i = 0; length < chars; i++) {
+      const line = `${sign}${path} line ${i} ${"x".repeat(60)}`;
+      lines.push(line);
+      length += line.length + 1;
+    }
+    return lines.join("\n");
+  };
+
+  const patchOf = (diff: string, path: string): string => {
+    const file = parseUnifiedDiffFiles(diff).find((candidate) => candidate.path === path);
+    if (!file) throw new Error(`no patch for ${path}`);
+    return file.patch;
+  };
+
+  /** Length of the longest prefix of the file's patch that reached the prompt. */
+  const shownChars = (out: string, patch: string): number => {
+    let low = 0;
+    let high = patch.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (out.includes(patch.slice(0, mid))) low = mid;
+      else high = mid - 1;
+    }
+    return low;
+  };
+
+  /**
+   * The packed prompt fits the budget on its own: it is no longer than
+   * maxChars and still ends with its closing note, so the final
+   * slice(0, maxChars) backstop cut nothing.
+   */
+  const expectBackstopUnused = (out: string, maxChars: number): void => {
+    expect(out.length).toBeLessThanOrEqual(maxChars);
+    const lastLine = out.slice(out.lastIndexOf("\n") + 1);
+    expect(lastLine.startsWith(TRUNCATED_NOTE_PREFIX)).toBe(true);
+  };
+
+  it("shows a large source file WHOLE when the diff is just over budget (uniform cap cut it)", () => {
+    const tests = Array.from({ length: 30 }, (_, i) => sizedDiff(`test/case-${String(i).padStart(2, "0")}.test.ts`, 1_300));
+    const diff = [...tests, sizedDiff("src/engine.ts", 20_000)].join("\n");
+    const budget = diff.length - 3_000;
+
+    const out = formatChangedFilesForPrompt(diff, budget);
+
+    expect(out).toContain("# Representative diff slices");
+    expect(out.includes(patchOf(diff, "src/engine.ts"))).toBe(true);
+    expectBackstopUnused(out, budget);
+  });
+
+  it("fills tiers in order: every source file WHOLE, then tests ahead of docs", () => {
+    const diff = [
+      sizedDiff("docs/a.md", 10_000),
+      sizedDiff("docs/b.md", 10_000),
+      sizedDiff("docs/c.md", 10_000),
+      sizedDiff("test/a.test.ts", 10_000),
+      sizedDiff("test/b.test.ts", 10_000),
+      sizedDiff("test/c.test.ts", 10_000),
+      sizedDiff("src/a.ts", 10_000),
+      sizedDiff("src/b.ts", 10_000),
+      sizedDiff("src/c.ts", 10_000),
+    ].join("\n");
+    const budget = 50_000;
+
+    const out = formatChangedFilesForPrompt(diff, budget);
+
+    for (const path of ["src/a.ts", "src/b.ts", "src/c.ts"]) expect(out.includes(patchOf(diff, path))).toBe(true);
+    const testShown = ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"].map((path) => shownChars(out, patchOf(diff, path)));
+    const docsShown = ["docs/a.md", "docs/b.md", "docs/c.md"].map((path) => shownChars(out, patchOf(diff, path)));
+    expect(Math.min(...testShown)).toBeGreaterThan(Math.max(...docsShown) * 3);
+    expectBackstopUnused(out, budget);
+  });
+
+  it("carries the slack of a file capped at MAX_FILE_SLICE_CHARS on to the next tier", () => {
+    const diff = [sizedDiff("src/huge.ts", 100_000), sizedDiff("test/huge.test.ts", 50_000)].join("\n");
+    const budget = 120_000;
+
+    const out = formatChangedFilesForPrompt(diff, budget);
+
+    const sourceShown = shownChars(out, patchOf(diff, "src/huge.ts"));
+    expect(sourceShown).toBeGreaterThan(60_000);
+    expect(sourceShown).toBeLessThanOrEqual(64_000);
+    expect(out.includes(patchOf(diff, "test/huge.test.ts"))).toBe(true);
+    expectBackstopUnused(out, budget);
+  });
+
+  it("admits the highest-priority files with viable slices and omits the lowest, never all", () => {
+    const docs = Array.from({ length: 150 }, (_, i) => sizedDiff(`docs/page-${String(i).padStart(3, "0")}.md`, 2_000));
+    const tests = Array.from({ length: 50 }, (_, i) => sizedDiff(`test/t-${String(i).padStart(3, "0")}.test.ts`, 2_000));
+    const diff = [...docs, ...tests, sizedDiff("src/core.ts", 2_000)].join("\n");
+    const budget = 40_000;
+
+    const out = formatChangedFilesForPrompt(diff, budget);
+
+    expect(out.includes(patchOf(diff, "src/core.ts"))).toBe(true);
+    const testPaths = tests.map((_, i) => `test/t-${String(i).padStart(3, "0")}.test.ts`);
+    const shownTests = testPaths.filter((path) => out.includes(`\n# ${path} (`));
+    expect(shownTests.length).toBeGreaterThan(0);
+    expect(shownTests.length).toBeLessThan(testPaths.length);
+    // A file that is shown at all gets a viable slice, not a sliver.
+    for (const path of shownTests) expect(shownChars(out, patchOf(diff, path))).toBeGreaterThanOrEqual(500);
+    expect(out).not.toContain("diff --git a/docs/page-000.md");
+    expect(out).toMatch(/# \.\.\. \d+ changed file\(s\) omitted from diff slices/);
+    expectBackstopUnused(out, budget);
+  });
+
+  it("keeps a deleted production file in the source tier, ahead of docs, under a tight budget", () => {
+    const docs = Array.from({ length: 10 }, (_, i) => sizedDiff(`docs/guide-${i}.md`, 2_000));
+    const diff = [...docs, sizedDiff("src/legacy.ts", 2_000, "deleted")].join("\n");
+    const budget = 9_000;
+
+    const out = formatChangedFilesForPrompt(diff, budget);
+
+    expect(out).toContain("# src/legacy.ts (deleted");
+    expect(out.includes(patchOf(diff, "src/legacy.ts"))).toBe(true);
+    expect(promptPriority(parseUnifiedDiffFiles(diff).find((file) => file.path === "src/legacy.ts")!)).toBe(5);
+    expectBackstopUnused(out, budget);
+  });
+
+  it("emits blocks in priority order, deletions last, whatever order the budget was shared in", () => {
+    const diff = [
+      sizedDiff("src/legacy.ts", 1_500, "deleted"),
+      sizedDiff("docs/notes.md", 1_500),
+      sizedDiff("src/small.ts", 1_000),
+      sizedDiff("src/large.ts", 70_000),
+      sizedDiff("test/a.test.ts", 1_500),
+    ].join("\n");
+
+    const out = formatChangedFilesForPrompt(diff, 70_000);
+    const positions = ["src/large.ts", "src/small.ts", "test/a.test.ts", "docs/notes.md", "src/legacy.ts"].map((path) =>
+      out.indexOf(`\n# ${path} (`),
+    );
+
+    for (const position of positions) expect(position).toBeGreaterThan(0);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  });
+
+  it("shows a non-empty prefix of a single changed line longer than its slice", () => {
+    const longLine = `+${"A".repeat(400_000)}`;
+    const diff = [
+      "diff --git a/assets/bundle.js.map b/assets/bundle.js.map",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/assets/bundle.js.map",
+      "@@ -0,0 +1 @@",
+      longLine,
+    ].join("\n");
+    const budget = 200_000;
+
+    const out = formatChangedFilesForPrompt(diff, budget);
+
+    expect(out.includes(`+${"A".repeat(10_000)}`)).toBe(true);
+    expect(out).toContain("# ... file diff truncated");
+    expectBackstopUnused(out, budget);
+  });
+
+  it("still trims an ordinary truncated slice back to a whole line", () => {
+    const diff = [sizedDiff("src/a.ts", 30_000), sizedDiff("src/b.ts", 30_000)].join("\n");
+    const out = formatChangedFilesForPrompt(diff, 20_000);
+    const patch = patchOf(diff, "src/a.ts");
+    const shown = shownChars(out, patch);
+
+    expect(shown).toBeGreaterThan(0);
+    expect(shown).toBeLessThan(patch.length);
+    // The shown prefix stops exactly at a line end (the slice's own newline
+    // before the truncation marker matches the patch's), never inside a line.
+    expect(patch[shown - 1]).toBe("\n");
+  });
+
+  it("bounds the overview, by priority, when the overview alone would overflow the budget", () => {
+    const docs = Array.from({ length: 400 }, (_, i) => sizedDiff(`docs/a-very-long-directory-name/page-${String(i).padStart(4, "0")}.md`, 300));
+    const diff = [...docs, sizedDiff("src/only-source.ts", 300)].join("\n");
+    const budget = 8_000;
+
+    const out = formatChangedFilesForPrompt(diff, budget);
+
+    expect(out).toContain("# Changed file overview (401 files");
+    expect(out).toContain("# - src/only-source.ts (modified");
+    expect(out).toMatch(/# \.\.\. and \d+ more changed file\(s\) not listed/);
+    expect(out).not.toContain("page-0399.md");
+    expectBackstopUnused(out, budget);
+  });
+
+  it("never needs the final backstop across budgets and diff shapes", () => {
+    const diff = [
+      sizedDiff("docs/readme-extra.md", 12_000),
+      sizedDiff("src/a.ts", 30_000),
+      sizedDiff("src/b.ts", 900),
+      sizedDiff("src/old.ts", 4_000, "deleted"),
+      sizedDiff("test/a.test.ts", 8_000),
+      sizedDiff("config/app.yaml", 5_000),
+      ...Array.from({ length: 40 }, (_, i) => sizedDiff(`docs/n-${i}.md`, 800)),
+    ].join("\n");
+    for (let budget = 8_000; budget < diff.length; budget += 3_700) {
+      expectBackstopUnused(formatChangedFilesForPrompt(diff, budget), budget);
+    }
+  });
+
+  it("is deterministic and independent of the order files appear in the diff", () => {
+    const parts = [
+      sizedDiff("src/a.ts", 9_000),
+      sizedDiff("src/b.ts", 9_000),
+      sizedDiff("test/a.test.ts", 9_000),
+      sizedDiff("docs/a.md", 9_000),
+    ];
+    const forward = formatChangedFilesForPrompt(parts.join("\n"), 20_000);
+    const again = formatChangedFilesForPrompt(parts.join("\n"), 20_000);
+    const reversed = formatChangedFilesForPrompt([...parts].reverse().join("\n"), 20_000);
+    const slices = (out: string) => out.slice(out.indexOf("# Representative diff slices"));
+
+    expect(again).toBe(forward);
+    expect(slices(reversed)).toBe(slices(forward));
+  });
+
+  describe("FULL regime is unchanged", () => {
+    const fileDiff = (path: string, body: string) =>
+      [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, "@@ -1,1 +1,2 @@", " context", `+${body}`].join("\n");
+    const diff = `${[fileDiff("src/a.ts", "one"), fileDiff("docs/b.md", "two"), fileDiff("test/c.test.ts", "three")].join("\n")}\n`;
+    const patchLines = (path: string, body: string) => [
+      `diff --git a/${path} b/${path}`,
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      "@@ -1,1 +1,2 @@",
+      " context",
+      `+${body}`,
+    ];
+
+    it("matches the golden output recorded from the pre-change packer (c410bfe)", () => {
+      const golden = [
+        "# Changed file overview (3 files, +3/-0)",
+        "# - src/a.ts (modified, +1/-0)",
+        "# - docs/b.md (modified, +1/-0)",
+        "# - test/c.test.ts (modified, +1/-0)",
+        "",
+        "# Full diff",
+        ...patchLines("src/a.ts", "one"),
+        ...patchLines("docs/b.md", "two"),
+        ...patchLines("test/c.test.ts", "three"),
+        "",
+      ].join("\n");
+      const goldenExcluded = [
+        "# Changed file overview (2 files, +2/-0)",
+        "# - src/a.ts (modified, +1/-0)",
+        "# - test/c.test.ts (modified, +1/-0)",
+        "# ... 1 changed file(s) excluded from this prompt by exclude_paths and NOT shown; do not report findings about them.",
+        "",
+        "# Full diff",
+        ...patchLines("src/a.ts", "one"),
+        ...patchLines("test/c.test.ts", "three"),
+      ].join("\n");
+
+      expect(formatChangedFilesForPrompt(diff, 320_000)).toBe(golden);
+      expect(formatChangedFilesForPrompt(diff, 320_000, { excludePaths: ["docs/**"] })).toBe(goldenExcluded);
+    });
+
+    it("stays FULL at exactly the budget and switches to slices one character below it", () => {
+      const full = formatChangedFilesForPrompt(diff, 320_000);
+      expect(formatChangedFilesForPrompt(diff, full.length)).toBe(full);
+      expect(formatChangedFilesForPrompt(diff, full.length - 1)).toContain("# Representative diff slices");
+    });
+  });
+});

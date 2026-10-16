@@ -112,6 +112,11 @@ export interface ReviewAttemptMetric {
   streamEventCount?: number;
   malformedLineCount?: number;
   lastEventType?: string;
+  /**
+   * The wall clock this attempt ran on when it was shortened: set only on a
+   * `timeout` retry (ruling 4). Absent means the role's normal budget. Additive.
+   */
+  runTimeoutSeconds?: number;
 }
 
 export interface ReviewSummaryInput {

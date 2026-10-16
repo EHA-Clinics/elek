@@ -16,6 +16,7 @@ import { describe, it, expect } from "bun:test";
 import {
   assessSerialBudget,
   reportSerialBudget,
+  resolveTimeoutRetrySeconds,
   SETUP_SECONDS,
   type SerialBudgetReporter,
 } from "../src/review/serial-budget";
@@ -232,6 +233,56 @@ describe("assessSerialBudget", () => {
     });
     expect(r.outcome).toBe("fail");
     for (const n of ["900", "2737", "2700"]) expect(r.message).toContain(n);
+  });
+});
+
+describe("resolveTimeoutRetrySeconds (ruling 4: one shorter timeout retry)", () => {
+  // T2 = min(floor(R / 2), cap - setup - elapsed - V - margin), undefined when the cap is
+  // unset or T2 < 120s. undefined means NO retry: absence of a provable budget fails closed.
+  it("eha_care on-demand numbers: R=900, V=1200, 65 min, elapsed 905 -> 450", () => {
+    expect(
+      resolveTimeoutRetrySeconds({ runTimeoutSeconds: 900, validatorSeconds: 1200, jobTimeoutMinutes: 65, elapsedSeconds: 905 }),
+    ).toBe(450);
+  });
+
+  it("fleet default: R=600, V unset (so 600), 35 min, elapsed 605 -> 300", () => {
+    expect(
+      resolveTimeoutRetrySeconds({ runTimeoutSeconds: 600, validatorSeconds: undefined, jobTimeoutMinutes: 35, elapsedSeconds: 605 }),
+    ).toBe(300);
+  });
+
+  it("an unset job cap gives NO retry (nothing can be proven to fit)", () => {
+    expect(
+      resolveTimeoutRetrySeconds({ runTimeoutSeconds: 900, validatorSeconds: 1200, jobTimeoutMinutes: undefined, elapsedSeconds: 905 }),
+    ).toBeUndefined();
+  });
+
+  it("the live clock binds: the remaining budget wins when it is below R/2", () => {
+    // 3900 - 37 - 2300 - 1200 - 60 = 303
+    expect(
+      resolveTimeoutRetrySeconds({ runTimeoutSeconds: 900, validatorSeconds: 1200, jobTimeoutMinutes: 65, elapsedSeconds: 2300 }),
+    ).toBe(303);
+  });
+
+  it("a tight cap below the 120s floor gives NO retry; exactly 120s still retries", () => {
+    const at = (elapsedSeconds: number) =>
+      resolveTimeoutRetrySeconds({ runTimeoutSeconds: 900, validatorSeconds: 1200, jobTimeoutMinutes: 65, elapsedSeconds });
+    expect(at(2483)).toBe(120); // 3900 - 37 - 2483 - 1200 - 60 = 120
+    expect(at(2484)).toBeUndefined(); // 119
+    expect(at(2500)).toBeUndefined(); // 103
+  });
+
+  it("a roomy cap gives floor(R / 2)", () => {
+    expect(
+      resolveTimeoutRetrySeconds({ runTimeoutSeconds: 901, validatorSeconds: 600, jobTimeoutMinutes: 120, elapsedSeconds: 0 }),
+    ).toBe(450);
+  });
+
+  it("never exceeds R/2, so a retry always fits the 2R allowance the pre-run guard asserted", () => {
+    for (const elapsedSeconds of [0, 300, 905, 1500]) {
+      const t2 = resolveTimeoutRetrySeconds({ runTimeoutSeconds: 900, validatorSeconds: 1200, jobTimeoutMinutes: 65, elapsedSeconds });
+      expect(t2 === undefined || t2 <= 450).toBe(true);
+    }
   });
 });
 

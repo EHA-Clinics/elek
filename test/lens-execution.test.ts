@@ -154,28 +154,82 @@ describe("executeLensWithRetry", () => {
     const out = await executeLensWithRetry({ job: job(PRO), roster: ROSTER, deps: { runAttempt: rec.runAttempt } });
 
     // A third attempt here would blow the job-cap arithmetic that assumes
-    // setup + 2 x run_timeout for the classes that DO retry, so it must never
-    // happen. (`timeout` no longer retries at all — see FAILURE_RETRY_POLICY —
-    // which is what brings the serial worst case back under the 1800s job cap.)
+    // setup + 2 x run_timeout for the classes that retry, so it must never happen.
+    // (A `timeout` retry runs on a SHORTER budget, at most R/2 and what the live
+    // clock leaves; see resolveTimeoutRetrySeconds.)
     expect(rec.seen).toHaveLength(2);
     expect(out.attempts).toHaveLength(2);
   });
 
-  it("spends exactly ONE attempt on a timeout — the class that used to cost two", async () => {
-    // The execution-level coverage this file previously lacked entirely: every case
-    // here used stall, provider_transient or an unclassified failure, so the timeout
-    // path had no end-to-end test at all and shipped its wrong policy row unchallenged.
-    const rec = recorder([fail(PRO.label, "timeout")]);
-    const out = await executeLensWithRetry({ job: job(PRO), roster: ROSTER, deps: { runAttempt: rec.runAttempt } });
+  // eha_care's on-demand caller: R=900, V=1200, 65 min; the first attempt timed out at 905s.
+  const EHA_BUDGET = () => ({ runTimeoutSeconds: 900, validatorSeconds: 1200, jobTimeoutMinutes: 65, elapsedSeconds: 905 });
 
-    expect(rec.seen).toHaveLength(1);
-    expect(out.retried).toBe(false);
-    expect(out.failoverUsed).toBe(false);
-    expect(out.attempts).toHaveLength(1);
-    expect(out.attemptMetrics).toHaveLength(1);
+  /** Like recorder(), but also records the per-attempt override each attempt was given. */
+  function overrideRecorder(results: PiRunResult[]) {
+    const seen: Array<{ model: string; promptName: string; runTimeoutSeconds: number | undefined }> = [];
+    let i = 0;
+    return {
+      seen,
+      runAttempt: async (activeJob: ReviewJob, promptName: string, overrides?: { runTimeoutSeconds?: number }) => {
+        seen.push({ model: activeJob.model.label, promptName, runTimeoutSeconds: overrides?.runTimeoutSeconds });
+        return results[Math.min(i++, results.length - 1)];
+      },
+    };
+  }
+
+  it("retries a timeout ONCE, on the next distinct model, with the shorter per-attempt budget", async () => {
+    // Ruling 4: 35 of 39 measured timeouts were mimo-v2.5-pro first attempts at 900s while
+    // the other lenses of the same runs finished; the overrun was the model's.
+    const rec = overrideRecorder([fail(PRO.label, "timeout"), piResult({ modelLabel: MIMO.label })]);
+    const out = await executeLensWithRetry({
+      job: job(PRO),
+      roster: ROSTER,
+      deps: { runAttempt: rec.runAttempt, timeoutRetryBudget: EHA_BUDGET },
+    });
+
+    expect(rec.seen.map((s) => s.model)).toEqual([PRO.label, MIMO.label]);
+    // The first attempt keeps the caller's R; only the retry is shortened to T2 = 450s.
+    expect(rec.seen.map((s) => s.runTimeoutSeconds)).toEqual([undefined, 450]);
+    expect(rec.seen[1].promptName).toBe("lens-tests-retry");
+    expect(out.retried).toBe(true);
+    expect(out.failoverUsed).toBe(true);
+    expect(out.attempts).toHaveLength(2);
+    expect(out.lensResult.conclusion).toBe("success");
+    // The census can see the shorter budget on the retry, and only there.
+    expect(out.attemptMetrics[0]).not.toHaveProperty("runTimeoutSeconds");
+    expect(out.attemptMetrics[1].runTimeoutSeconds).toBe(450);
+  });
+
+  it("never spends a third attempt after a second timeout", async () => {
+    const rec = overrideRecorder([fail(PRO.label, "timeout"), fail(MIMO.label, "timeout"), piResult({ modelLabel: FLASH.label })]);
+    const out = await executeLensWithRetry({
+      job: job(PRO),
+      roster: ROSTER,
+      deps: { runAttempt: rec.runAttempt, timeoutRetryBudget: EHA_BUDGET },
+    });
+
+    expect(rec.seen).toHaveLength(2);
+    expect(out.attempts).toHaveLength(2);
     expect(out.lensResult.failureClass).toBe("timeout");
-    // The lens still FAILS — this narrows the wall clock, it does not soften the gate.
+    // The lens still FAILS: the retry adds one chance, it does not soften the gate.
     expect(out.lensResult.conclusion).toBe("failure");
+  });
+
+  it("spends exactly ONE attempt on a timeout when no retry budget can be proven", async () => {
+    // No budget handed over (or an unset job cap): fail closed, exactly as before ruling 4.
+    for (const timeoutRetryBudget of [undefined, () => ({ ...EHA_BUDGET(), jobTimeoutMinutes: undefined })]) {
+      const rec = overrideRecorder([fail(PRO.label, "timeout")]);
+      const out = await executeLensWithRetry({
+        job: job(PRO),
+        roster: ROSTER,
+        deps: { runAttempt: rec.runAttempt, timeoutRetryBudget },
+      });
+
+      expect(rec.seen).toHaveLength(1);
+      expect(out.retried).toBe(false);
+      expect(out.attempts).toHaveLength(1);
+      expect(out.lensResult.conclusion).toBe("failure");
+    }
   });
 
   it("still spends TWO attempts on a stall, so failover was narrowed and not removed", async () => {
@@ -285,8 +339,8 @@ describe("executeLensWithRetry", () => {
  * Structural: there is EXACTLY ONE elek-managed outer retry layer.
  *
  * The job-cap arithmetic downstream is `setup + 2 x run_timeout` for the classes
- * that retry at all — `timeout` does not, which is what keeps the serial worst
- * case under the job cap. A second
+ * that retry; a `timeout` retry is shorter still (at most R/2, from the live
+ * clock), which is what keeps the serial worst case under the job cap. A second
  * retry layer stacked anywhere — a `for` loop around a lens, a retry inside
  * runPi, a wrapper around the validator — makes that arithmetic wrong by a whole
  * wall-clock budget and converts an honest red into a cancelled job with no
@@ -325,6 +379,16 @@ describe("retry layering", () => {
     // `runAttempt` dependency, the other is the final synthesis, which is not
     // retried at all. A third call site is a new retry surface by definition.
     expect(callSites).toEqual(["run.ts", "run.ts"]);
+  });
+
+  it("run.ts hands the executor a live-clock timeout budget and honours the retry override", () => {
+    // run() executes on import, so its wiring is asserted on the source.
+    const run = readFileSync(join(import.meta.dir, "..", "src", "entrypoints", "run.ts"), "utf-8");
+    expect(run).toMatch(
+      /timeoutRetryBudget: \(\) => \(\{[\s\S]*?jobTimeoutMinutes: parsedInputs\.jobTimeoutMinutes,[\s\S]*?elapsedSeconds: \(Date\.now\(\) - actionStartedAt\.getTime\(\)\) \/ 1000,/,
+    );
+    expect(run).toContain("lensInputsFor(activeJob, overrides)");
+    expect(run).toMatch(/runTimeoutSeconds:\s*overrides\?\.runTimeoutSeconds \?\?/);
   });
 
   it("contains no loop-shaped retry around a lens attempt", () => {

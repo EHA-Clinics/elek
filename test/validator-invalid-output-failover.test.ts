@@ -375,7 +375,9 @@ describe("orchestrator wiring (EHAC-2522)", () => {
 
   it("prices the pre-run cost estimate through costEstimateLensJobs with the pinned model", () => {
     expect(run).toMatch(
-      /const estimatePlannedInputCost = [\s\S]*?costEstimateLensJobs\(plan, validatorReviewFailoverModel\)\.map\(/,
+      // The third argument prices ONE extra reviewer attempt (ruling 4); the pinned
+      // model must still be the second.
+      /const estimatePlannedInputCost = [\s\S]*?costEstimateLensJobs\(plan, validatorReviewFailoverModel(?:, [\s\S]*?)?\)\.map\(/,
     );
   });
 });

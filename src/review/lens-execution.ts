@@ -14,7 +14,14 @@
 import type { PiRunResult } from "../types.js";
 import type { DiffPromptBudgetReport, ModelSpec, ReviewJob } from "./strategy.js";
 import { resolveLensRetry } from "./strategy.js";
+import type { TimeoutRetryBudgetInput } from "./serial-budget.js";
 import type { ReviewAttemptMetric, ReviewRunRole } from "./summary.js";
+
+/** Per-attempt overrides the executor hands to `runAttempt`. */
+export interface LensAttemptOverrides {
+  /** A shorter wall clock for a `timeout` retry (ruling 4). Absent: the role's normal budget. */
+  runTimeoutSeconds?: number;
+}
 
 export interface LensExecutionDeps {
   /**
@@ -23,7 +30,12 @@ export interface LensExecutionDeps {
    * a model substitution gets the replacement model's prompt label and its diff
    * budget instead of the failed model's.
    */
-  runAttempt: (job: ReviewJob, promptName: string) => Promise<PiRunResult>;
+  runAttempt: (job: ReviewJob, promptName: string, overrides?: LensAttemptOverrides) => Promise<PiRunResult>;
+  /**
+   * The job's wall-clock state, read from the live clock when an attempt has failed
+   * (ruling 4). Without it a `timeout` is never retried, because no budget can be proven.
+   */
+  timeoutRetryBudget?: () => TimeoutRetryBudgetInput;
   /** The budget report the packer produced for THIS job's prompt, if any. */
   promptBudgetFor?: (job: ReviewJob) => DiffPromptBudgetReport | undefined;
   log?: (message: string) => void;
@@ -51,6 +63,7 @@ function attemptMetric(params: {
   failover: boolean;
   result: PiRunResult;
   promptBudget?: DiffPromptBudgetReport;
+  runTimeoutSeconds?: number;
 }): ReviewAttemptMetric {
   const { job, usedJob, result } = params;
   return {
@@ -83,6 +96,8 @@ function attemptMetric(params: {
     malformedLineCount: result.malformedLineCount ?? 0,
     ...(result.lastEventType ? { lastEventType: result.lastEventType } : {}),
     ...(params.promptBudget ? { promptBudget: params.promptBudget } : {}),
+    // Additive, and only on an attempt that ran on an overridden (shorter) budget.
+    ...(params.runTimeoutSeconds !== undefined ? { runTimeoutSeconds: params.runTimeoutSeconds } : {}),
   };
 }
 
@@ -103,7 +118,7 @@ export async function executeLensWithRetry(params: {
   let failoverUsed = false;
   let retried = false;
 
-  const record = (result: PiRunResult, usedJob: ReviewJob, failover: boolean) => {
+  const record = (result: PiRunResult, usedJob: ReviewJob, failover: boolean, runTimeoutSeconds?: number) => {
     attempts.push(result);
     attemptMetrics.push(
       attemptMetric({
@@ -113,6 +128,7 @@ export async function executeLensWithRetry(params: {
         failover,
         result,
         promptBudget: deps.promptBudgetFor?.(usedJob),
+        runTimeoutSeconds,
       }),
     );
   };
@@ -128,6 +144,8 @@ export async function executeLensWithRetry(params: {
     assignedModel: job.model,
     roster,
     validatorReviewFailoverModel: params.validatorReviewFailoverModel,
+    // Read from the live clock only when the attempt timed out.
+    timeoutBudget: lensResult.failureClass === "timeout" ? deps.timeoutRetryBudget?.() : undefined,
   });
 
   if (lensResult.conclusion === "failure" && !decision.retry) {
@@ -148,8 +166,10 @@ export async function executeLensWithRetry(params: {
     warn(
       `[${job.lens.id}] attempt 1 failed (class=${lensResult.failureClass ?? "unclassified"}) — ${decision.reason}`,
     );
-    const retryResult = await deps.runAttempt(activeJob, `lens-${job.lens.id}-retry`);
-    record(retryResult, activeJob, decision.failover);
+    const overrides: LensAttemptOverrides | undefined =
+      decision.runTimeoutSeconds !== undefined ? { runTimeoutSeconds: decision.runTimeoutSeconds } : undefined;
+    const retryResult = await deps.runAttempt(activeJob, `lens-${job.lens.id}-retry`, overrides);
+    record(retryResult, activeJob, decision.failover, overrides?.runTimeoutSeconds);
     log(
       retryResult.conclusion === "success"
         ? `[${job.lens.id}] retry succeeded on ${activeJob.model.label}`

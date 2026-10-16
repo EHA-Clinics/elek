@@ -82,6 +82,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In council mode the public model label is the VALIDATOR's — the model that
   writes the synthesis — not the primary `model` input, which is a reviewer lens.
 
+### Changed
+
+- A reviewer lens that times out is retried ONCE on the next distinct model, on a
+  shorter per-attempt budget (EHAC-2844, owner ruling 4): `T2 = min(floor(R/2),
+  job_timeout_minutes x 60 - setup - elapsed - V - 60)`, read from the live clock when
+  the attempt fails, and no retry at all when `job_timeout_minutes` is unset or T2 is
+  under 120s. A `validator-review` timeout is still never retried. Evidence: 39 timeout
+  attempts in 682 council records (2026-10-06..16), 35 on `xiaomi/mimo-v2.5-pro` (design
+  lens), all first attempts at 900s and never retried, while the other lenses of the
+  same runs finished (median ~300s); this reverses the EHAC-2231 no-retry rule. The
+  attempt metric records the shorter `runTimeoutSeconds` on the retry (additive), and
+  the pre-run `max_cost_usd` estimate now prices ONE extra reviewer attempt: the most
+  expensive next-distinct-model replacement, on its own prompt.
+- elek's own advisory self-review (`.github/workflows/elek.yml`) runs on two OpenRouter
+  models the account guardrail allows, `openrouter/deepseek/deepseek-v4.1-flash` and
+  `openrouter/xiaomi/mimo-v2.6-pro` (reasoning enabled, capped at 12000 tokens), both
+  through the org `OPENROUTER_API_KEY` (EHAC-2844, owner ruling 8). The direct-DeepSeek
+  lane is removed (its secret does not exist in this repo) and the kimi-k2.7-code lane is
+  replaced (blocked by the guardrail). No new secret.
+
 ### Security
 
 - The review runtime is `@earendil-works/pi-coding-agent` 1.1.0 (was 0.84.2), with

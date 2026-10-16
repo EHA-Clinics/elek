@@ -5,6 +5,11 @@ import { findingValidationBullets, reviewContractBullets, reviewFindingTemplate 
 import { formatConfigPromptBlock, normalizeReviewStrategy, type ElekConfig } from "../config.js";
 import { aggregateCosts, formatUsd, type ReviewCost } from "./cost.js";
 import { diffPromptBudgetChars, formatChangedFilesForPrompt } from "./diff-context.js";
+import {
+  resolveTimeoutRetrySeconds,
+  TIMEOUT_RETRY_MIN_SECONDS,
+  type TimeoutRetryBudgetInput,
+} from "./serial-budget.js";
 
 export type ReviewStrategy = "solo" | "crosscheck" | "council" | "thermos";
 
@@ -60,9 +65,10 @@ export function failedRequiredReviewLensIds(
  * attempt. The job-cap arithmetic downstream depends on that: one initial
  * attempt plus at most one retry, never a hidden third.
  *
- * Note the WORST CASE is narrower than this constant implies: `timeout` — the one
- * class that reliably consumed a whole extra budget — no longer retries at all
- * (see FAILURE_RETRY_POLICY), so a timing-out lens costs one attempt, not two.
+ * A `timeout` retry (owner ruling 4) is bounded tighter than this constant implies:
+ * it runs on a SHORTER per-attempt budget, at most R/2 and never more than the live
+ * clock leaves before the validator (`resolveTimeoutRetrySeconds`), so a timing-out
+ * lens costs at most 1.5 run budgets, not two.
  */
 export const MAX_LENS_ATTEMPTS = 2;
 
@@ -87,28 +93,24 @@ export const MAX_LENS_ATTEMPTS = 2;
  * state, and it must stay that way: retrying on a class we could not establish
  * is guessing with the job's wall clock.
  *
- * ⚠️ `timeout` DOES NOT RETRY EITHER, and that row was FALSIFIED BY MEASUREMENT
- * rather than reasoned. It shipped as `next-distinct-model` on the theory that a
- * timeout might be model-specific. eha_care PR #3680, run 32105023640, settled it:
- * four timeout retries were issued on four DIFFERENT models, three timed out
- * again and the fourth returned `invalid_output`. Every failing attempt was
- * streaming continuously — 1,896 to 2,091 events, 3 to 6 turns, 5 to 12 tool
- * calls, max idle gap 5.2 to 9.2s — so none of it was a stall.
+ * `timeout` RETRIES ONCE on the next distinct model, on a SHORTER per-attempt
+ * budget (owner ruling 4, 2026-10-16, EHAC-2844). History: the row shipped as
+ * `next-distinct-model`, was switched to no-retry after eha_care #3680 (run
+ * 32105023640: four retries on four models, three timed out again, every attempt
+ * streaming continuously), which read a timeout as a property of the PROMPT. The
+ * fleet census then contradicted that generalisation: 39 timeout attempts in 682
+ * council records (2026-10-06..16), 35 of them xiaomi/mimo-v2.5-pro on the design
+ * lens, every one a FIRST attempt at exactly 900s and never retried, while the
+ * other lenses of the same runs on the same prompt finished (median ~300s). Those
+ * overruns were the model's, so a different model is a real remedy.
  *
- * A `timeout` means the wall-clock budget expired while real work was arriving.
- * That is a property of the PROMPT, not of the model, so moving models cannot fix
- * it and the retry only spends a second full budget confirming the first result.
- * On that run it burned roughly half of a 20m42s job on attempts incapable of
- * succeeding, and the wall clock is the scarce resource: the serial worst case
- * `setup + attempt + retry + validator` was 1837s against a 1800s job cap, and a
- * cancelled job loses the coverage record entirely.
- *
- * Not retrying costs nothing where a tolerance exists. With
- * `max_degraded_lenses >= 1` a single timing-out lens was already going to be
- * tolerated as a degraded council; it now reaches that verdict a full run budget
- * sooner. Where no tolerance exists, both paths fail — one of them just fails
- * faster. The remedy for `timeout` is more wall clock or a smaller prompt, never
- * another model.
+ * What made #3680 costly is kept out by construction: the retry gets
+ * `resolveTimeoutRetrySeconds` (at most R/2, and only what the live job clock can
+ * still afford before the validator), so it cannot reach the job cap and lose the
+ * coverage record; with no provable budget (job_timeout_minutes unset, or under
+ * 120s left) it does not retry at all. The validator-review lane never retries a
+ * timeout (see resolveLensRetry): its failure blocks at any tolerance and it
+ * already carries the validator budget.
  */
 export type LensRetryTarget = "same-model" | "next-distinct-model";
 
@@ -116,7 +118,7 @@ export const FAILURE_RETRY_POLICY: Readonly<
   Record<PiFailureClass, { retry: boolean; target: LensRetryTarget }>
 > = Object.freeze({
   stall: { retry: true, target: "next-distinct-model" },
-  timeout: { retry: false, target: "same-model" },
+  timeout: { retry: true, target: "next-distinct-model" },
   max_turns: { retry: true, target: "next-distinct-model" },
   invalid_output: { retry: true, target: "next-distinct-model" },
   provider_transient: { retry: true, target: "same-model" },
@@ -194,6 +196,12 @@ export interface LensRetryDecision {
   failover: boolean;
   /** Human-readable justification, logged and recorded in the attempt history. */
   reason: string;
+  /**
+   * The per-attempt wall clock for the retry, set ONLY for a `timeout` retry
+   * (ruling 4): shorter than the first attempt's, from resolveTimeoutRetrySeconds.
+   * Absent means the retry keeps the role's normal budget.
+   */
+  runTimeoutSeconds?: number;
 }
 
 /**
@@ -229,6 +237,11 @@ export function resolveLensRetry(params: {
   roster: readonly ModelSpec[];
   /** The caller-pinned validator-review failover for `invalid_output` (EHAC-2522). */
   validatorReviewFailoverModel?: ModelSpec;
+  /**
+   * The job's wall-clock state, evaluated when the attempt failed. Required for a
+   * `timeout` retry; absent means no retry budget can be proven, so none happens.
+   */
+  timeoutBudget?: TimeoutRetryBudgetInput;
 }): LensRetryDecision {
   const no = (reason: string): LensRetryDecision => ({ retry: false, failover: false, reason });
 
@@ -274,6 +287,21 @@ export function resolveLensRetry(params: {
     return no(`failure class "${failureClass}" is not retried`);
   }
 
+  // Ruling 4: a timeout retries once, but only on a SHORTER per-attempt budget
+  // that the job can prove it still affords. No provable budget, no retry.
+  let timeoutRetrySeconds: number | undefined;
+  if (failureClass === "timeout") {
+    timeoutRetrySeconds = params.timeoutBudget ? resolveTimeoutRetrySeconds(params.timeoutBudget) : undefined;
+    if (timeoutRetrySeconds === undefined) {
+      return no(
+        params.timeoutBudget?.jobTimeoutMinutes === undefined
+          ? 'failure class "timeout" retries only within a provable job budget, and job_timeout_minutes is unset'
+          : `failure class "timeout" is not retried: the job budget leaves less than the ` +
+              `${TIMEOUT_RETRY_MIN_SECONDS}s minimum for a retry`,
+      );
+    }
+  }
+
   if (policy.target === "same-model") {
     return {
       retry: true,
@@ -293,7 +321,10 @@ export function resolveLensRetry(params: {
     retry: true,
     model: replacement,
     failover: true,
-    reason: `failure class "${failureClass}" retries once on the next distinct model ${replacement.label}`,
+    reason:
+      `failure class "${failureClass}" retries once on the next distinct model ${replacement.label}` +
+      (timeoutRetrySeconds !== undefined ? ` with a ${timeoutRetrySeconds}s per-attempt budget` : ""),
+    ...(timeoutRetrySeconds !== undefined ? { runTimeoutSeconds: timeoutRetrySeconds } : {}),
   };
 }
 
@@ -460,30 +491,64 @@ export function resolveValidatorReviewFailoverModel(
 }
 
 /**
- * The lens attempts the pre-run `max_cost_usd` estimate prices (EHAC-2522).
+ * The lens attempts the pre-run `max_cost_usd` estimate prices (EHAC-2522, ruling 4).
  *
- * The planned wave, plus — only when a failover model is pinned, the plan has a
- * validator-review lane, and the pinned model is one `resolveLensRetry` would
- * actually move to — the pinned failover attempt, built as the replacement job
- * the executor would run, so it is priced at the FAILOVER model's rates on its
- * own prompt. Counting it is what stops a cap from being exceeded silently by an
- * attempt the estimate never saw. With no pinned model the result is the planned
- * wave unchanged.
+ * The planned wave, plus:
+ *
+ * - ONE extra reviewer attempt (ruling 4): reviewer lenses retry once on the next
+ *   distinct model (timeout, stall, max_turns, invalid_output, provider_unavailable),
+ *   so the estimate prices the most expensive such replacement across the reviewer
+ *   jobs, built as the job the executor would run and priced on its own prompt by
+ *   `priceOf`. Exactly one, not one per lens: pricing every possible retry would
+ *   roughly double the estimate and downgrade healthy councils, while 1 of 38
+ *   measured timeout runs had two timeouts. Without `priceOf` the first replacement
+ *   is used, so the attempt is never silently left out. A roster with no distinct
+ *   replacement adds nothing.
+ * - only when a failover model is pinned, the plan has a validator-review lane, and
+ *   the pinned model is one `resolveLensRetry` would actually move to: the pinned
+ *   failover attempt, priced at the FAILOVER model's rates on its own prompt.
+ *
+ * Counting them is what stops a cap from being exceeded silently by an attempt the
+ * estimate never saw.
  */
 export function costEstimateLensJobs(
   plan: Pick<ReviewPlan, "jobs" | "validatorReview">,
   validatorReviewFailoverModel: ModelSpec | undefined,
+  priceOf?: (job: ReviewJob) => number,
 ): ReviewJob[] {
   const wave = plan.validatorReview ? [...plan.jobs, plan.validatorReview] : plan.jobs;
+  const extraReviewer = mostExpensiveReviewerRetry(plan.jobs, priceOf);
+  const withRetry = extraReviewer ? [...wave, extraReviewer] : wave;
   const audit = plan.validatorReview;
   if (
     !audit ||
     !validatorReviewFailoverModel ||
     normalizeModelIdentity(validatorReviewFailoverModel) === normalizeModelIdentity(audit.model)
   ) {
-    return wave;
+    return withRetry;
   }
-  return [...wave, { ...audit, model: validatorReviewFailoverModel }];
+  return [...withRetry, { ...audit, model: validatorReviewFailoverModel }];
+}
+
+/** The single most expensive next-distinct-model replacement across reviewer jobs. */
+function mostExpensiveReviewerRetry(
+  jobs: readonly ReviewJob[],
+  priceOf: ((job: ReviewJob) => number) | undefined,
+): ReviewJob | undefined {
+  const roster = jobs.map((job) => job.model);
+  let best: ReviewJob | undefined;
+  let bestPrice = -Infinity;
+  for (const job of jobs) {
+    const model = selectFailoverModel({ roster, assigned: job.model });
+    if (!model) continue;
+    const replacement: ReviewJob = { ...job, model };
+    const price = priceOf ? priceOf(replacement) : 0;
+    if (best === undefined || price > bestPrice) {
+      best = replacement;
+      bestPrice = price;
+    }
+  }
+  return best;
 }
 
 export function parseReviewLensList(raw: string | undefined): ReviewLens[] {

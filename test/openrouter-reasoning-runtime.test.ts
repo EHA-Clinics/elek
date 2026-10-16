@@ -90,6 +90,14 @@ describe("pinned Pi reasoning extension under Node", () => {
       expect(nonrouter.conclusion).toBe("success");
       expect(nonrouter.reasoning).toBeUndefined();
       expect(requests.at(-1)?.reasoning).toBeUndefined();
+      // pi 1.0 rejects `--provider` without `--model`; an empty model input passes
+      // `--model fixture/`, which must resolve the provider's own model past auth and
+      // reach the server (the fixture provider has exactly one model, `plain`).
+      const before = requests.length;
+      const providerDefault = await runPi("synthetic provider default", { ...inputs, provider: "fixture", model: "" }, undefined, false, { promptName: "provider-default" });
+      expect(providerDefault.conclusion).toBe("success");
+      expect(requests.length).toBe(before + 1);
+      expect(requests.at(-1)?.model).toBe("plain");
       const silentExtension = join(tmp, "no-observation-pi");
       writeFileSync(silentExtension, '#!/usr/bin/env node\n' +
         'console.log(JSON.stringify({type:"agent_end",messages:[{role:"assistant",content:[{type:"text",text:"No findings."}],stopReason:"stop"}]}));\n');

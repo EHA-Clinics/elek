@@ -5,7 +5,7 @@
  * - Commit signing
  */
 import { execFileSync, type ExecFileSyncOptions } from "child_process";
-import type { GitHubEntityContext } from "../types";
+import type { GitHubEntityContext, ReviewedDiffProvenance } from "../types";
 
 const GITHUB_SERVER_URL = process.env.GITHUB_SERVER_URL || "https://github.com";
 const maxGitRefLength = 255;
@@ -149,10 +149,57 @@ export function pushBranch(branchName: string): void {
   console.log(`✓ Pushed branch: ${branchName}`);
 }
 
+function resolveCommit(ref: string): string | undefined {
+  try {
+    const resolved = execFileSync("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], {
+      encoding: "utf-8",
+      stdio: "pipe",
+    })
+      .trim()
+      .toLowerCase();
+    return /^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(resolved) ? resolved : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve both sides to commits FIRST, then diff those exact commits, so the
+ * recorded SHAs are by construction the ones the diff was built from. Diffing
+ * `<sha>...<sha>` prints byte-for-byte what `<ref>...<ref>` printed for the same
+ * commits; the only difference is that the SHAs can no longer drift from the diff.
+ */
+function diffCommits(
+  baseRef: string,
+  headRef: string,
+  diffSource: "remote" | "head",
+): GitDiffResult | undefined {
+  const reviewedBaseSha = resolveCommit(baseRef);
+  const reviewedHeadSha = resolveCommit(headRef);
+  if (!reviewedBaseSha || !reviewedHeadSha) return undefined;
+  const diff = diffRange(`${reviewedBaseSha}...${reviewedHeadSha}`);
+  if (diff === undefined) return undefined;
+  return { diff, diffSource, reviewedHeadSha, reviewedBaseSha };
+}
+
+export interface GitDiffResult extends ReviewedDiffProvenance {
+  diff: string;
+  diffSource: "remote" | "head";
+  reviewedHeadSha: string;
+  reviewedBaseSha: string;
+}
+
 /**
  * Get the git diff between two refs.
  */
 export function getGitDiff(baseRef: string, headRef: string, headSha?: string): string {
+  return readGitDiff(baseRef, headRef, headSha).diff;
+}
+
+/**
+ * Get the git diff between two refs, with the commits it was built from (U4).
+ */
+export function readGitDiff(baseRef: string, headRef: string, headSha?: string): GitDiffResult {
   const headRemoteRef = process.env.ELEK_HEAD_REMOTE_REF || headRef;
   assertSafeGitRefName(baseRef, "base ref");
   assertSafeGitRefName(headRef, "head ref");
@@ -164,14 +211,27 @@ export function getGitDiff(baseRef: string, headRef: string, headSha?: string): 
   // jobs do not need persisted git credentials merely to build the diff. A
   // verified head SHA prevents comment/review events checked out on the
   // default branch from being mistaken for the PR checkout.
-  if (!headSha || refContainsCommit("HEAD", headSha)) {
-    const localHeadDiff = diffRange(`origin/${baseRef}...HEAD`);
+  //
+  // Order (U4): a ref that IS the PR head comes first. A pull_request checkout
+  // is GitHub's synthetic merge commit (refs/pull/<n>/merge): it CONTAINS the PR
+  // head but is not it, so recording it would name a commit that exists on no
+  // branch and could never match `origin/<head>`. When the exact remote head is
+  // present (any same-repo PR with fetch-depth: 0) it is diffed instead; the
+  // merge commit is only the last resort (e.g. a fork PR), recorded honestly as
+  // what was diffed.
+  if (!headSha || refEqualsCommit("HEAD", headSha)) {
+    const localHeadDiff = diffCommits(`origin/${baseRef}`, "HEAD", "head");
     if (localHeadDiff !== undefined) return localHeadDiff;
   }
 
   if (!headSha || refEqualsCommit(`origin/${headRemoteRef}`, headSha)) {
-    const localRemoteDiff = diffRange(`origin/${baseRef}...origin/${headRemoteRef}`);
+    const localRemoteDiff = diffCommits(`origin/${baseRef}`, `origin/${headRemoteRef}`, "remote");
     if (localRemoteDiff !== undefined) return localRemoteDiff;
+  }
+
+  if (headSha && refContainsCommit("HEAD", headSha)) {
+    const mergeCheckoutDiff = diffCommits(`origin/${baseRef}`, "HEAD", "head");
+    if (mergeCheckoutDiff !== undefined) return mergeCheckoutDiff;
   }
 
   if (headSha) {

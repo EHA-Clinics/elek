@@ -175,6 +175,37 @@ describe("createSummaryFinalizer", () => {
     expect(summary.councilPolicy.status).toBe("degraded");
   });
 
+  it("carries the reviewed diff (U4) onto a FAILURE summary too", () => {
+    // Recorded when the diff is read, so a council that later breaches still
+    // names the commits its lenses reviewed.
+    const head = "c".repeat(40);
+    const base = "d".repeat(40);
+    const finalizer = finalizerFor();
+    finalizer.update({
+      diffProvenance: { diffSource: "remote", reviewedHeadSha: head, reviewedBaseSha: base },
+    });
+    finalizer.finalize({
+      conclusion: "failure",
+      terminalReason: "council_policy_breached",
+      failureMessage: "breached",
+    });
+
+    const summary = JSON.parse(readOutputs().review_summary_json[0]);
+    expect(summary.entity.diffSource).toBe("remote");
+    expect(summary.entity.reviewedHeadSha).toBe(head);
+    expect(summary.entity.reviewedBaseSha).toBe(base);
+  });
+
+  it("emits no reviewed-diff keys when no diff was read", () => {
+    const finalizer = finalizerFor();
+    finalizer.finalize({ conclusion: "success", terminalReason: "declined", skipReason: "actor_not_authorized" });
+
+    const summary = JSON.parse(readOutputs().review_summary_json[0]);
+    expect(summary.entity).not.toHaveProperty("diffSource");
+    expect(summary.entity).not.toHaveProperty("reviewedHeadSha");
+    expect(summary.entity).not.toHaveProperty("reviewedBaseSha");
+  });
+
   it("makes no false claim when there is no context to describe", () => {
     const finalizer = createSummaryFinalizer({ tmpDir: dir });
     expect(finalizer.finalize({ conclusion: "failure", terminalReason: "unexpected_error" })).toBe(false);

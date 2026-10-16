@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { aggregateCosts } from "../src/review/cost";
 import { buildReviewSummary, metricFromPiRun } from "../src/review/summary";
-import type { GitHubEntityContext, PiRunResult } from "../src/types";
+import type { GitHubEntityContext, PiRunResult, ReviewedDiffProvenance } from "../src/types";
 
 const context: GitHubEntityContext = {
   eventName: "pull_request",
@@ -362,5 +362,85 @@ describe("review summary", () => {
     expect(summary.modelRuns[0].costUsd).toBe(0);
     expect(summary.modelRuns[1].durationSeconds).toBe(0.1);
     expect(summary.modelRuns[1].costUsd).toBe(0.000001);
+  });
+});
+
+describe("review summary: reviewed diff (U4)", () => {
+  const HEAD = "a".repeat(40);
+  const BASE = "b".repeat(40);
+  const summaryWith = (diffProvenance?: ReviewedDiffProvenance, ctx: GitHubEntityContext = context) =>
+    buildReviewSummary({
+      context: ctx,
+      runId: "200",
+      jobRunLink: "https://github.com/acme/app/actions/runs/200",
+      conclusion: "success",
+      mode: "review",
+      requestedStrategy: "council",
+      executedStrategy: "council",
+      primaryModelLabel: "m",
+      finalModelLabel: "m",
+      startedAt: new Date("2026-10-16T00:00:00Z"),
+      finishedAt: new Date("2026-10-16T00:01:00Z"),
+      inlineComments: { posted: 0, skipped: 0, failed: 0 },
+      costTotal: aggregateCosts([]),
+      runs: [],
+      diffProvenance,
+    });
+
+  it("names the reviewed head, base and source for a local diff", () => {
+    const entity = summaryWith({ diffSource: "remote", reviewedHeadSha: HEAD, reviewedBaseSha: BASE })
+      .entity as Record<string, unknown>;
+    expect(entity.diffSource).toBe("remote");
+    expect(entity.reviewedHeadSha).toBe(HEAD);
+    expect(entity.reviewedBaseSha).toBe(BASE);
+  });
+
+  it("records an api diff as api with NO SHA, even if one is supplied", () => {
+    const entity = summaryWith({ diffSource: "api", reviewedHeadSha: HEAD, reviewedBaseSha: BASE })
+      .entity as Record<string, unknown>;
+    expect(entity.diffSource).toBe("api");
+    expect(entity).not.toHaveProperty("reviewedHeadSha");
+    expect(entity).not.toHaveProperty("reviewedBaseSha");
+  });
+
+  it("emits no key at all when no diff was read, and never borrows the event's SHAs", () => {
+    // The event SHAs must be VALID commit ids here: a placeholder like "abc" would be
+    // dropped by the SHA filter anyway, so a borrowing regression could not show.
+    const EVENT_HEAD = "c".repeat(40);
+    const EVENT_BASE = "d".repeat(40);
+    const eventContext: GitHubEntityContext = {
+      ...context,
+      pr: { ...context.pr!, headSha: EVENT_HEAD, baseSha: EVENT_BASE },
+    };
+    for (const provenance of [undefined, { diffSource: "api" as const }]) {
+      const entity = summaryWith(provenance, eventContext).entity as Record<string, unknown>;
+      expect(entity).not.toHaveProperty("reviewedHeadSha");
+      expect(entity).not.toHaveProperty("reviewedBaseSha");
+      expect(JSON.stringify(entity)).not.toContain(EVENT_HEAD);
+      expect(JSON.stringify(entity)).not.toContain(EVENT_BASE);
+    }
+    expect(summaryWith(undefined, eventContext).entity).not.toHaveProperty("diffSource");
+  });
+
+  it("drops a SHA that is not a full commit id instead of emitting a placeholder", () => {
+    for (const bad of ["", "abc", "HEAD", "A".repeat(40), `${"a".repeat(40)}\n`]) {
+      const entity = summaryWith({ diffSource: "head", reviewedHeadSha: bad, reviewedBaseSha: bad })
+        .entity as Record<string, unknown>;
+      expect(entity.diffSource).toBe("head");
+      expect(entity).not.toHaveProperty("reviewedHeadSha");
+      expect(entity).not.toHaveProperty("reviewedBaseSha");
+    }
+  });
+
+  it("keeps version 1 and every existing entity key unchanged", () => {
+    const withFields = summaryWith({ diffSource: "remote", reviewedHeadSha: HEAD, reviewedBaseSha: BASE });
+    const without = summaryWith(undefined);
+    expect(withFields.version).toBe(1);
+    const { diffSource, reviewedHeadSha, reviewedBaseSha, ...rest } = withFields.entity as Record<
+      string,
+      unknown
+    >;
+    expect([diffSource, reviewedHeadSha, reviewedBaseSha]).toEqual(["remote", HEAD, BASE]);
+    expect(rest).toEqual(without.entity);
   });
 });

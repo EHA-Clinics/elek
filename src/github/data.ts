@@ -1,8 +1,8 @@
 /**
  * GitHub data fetching and prompt building.
  */
-import type { GitHubEntityContext } from "../types.js";
-import { getGitDiff } from "./git.js";
+import type { GitHubEntityContext, ReviewedDiffProvenance } from "../types.js";
+import { readGitDiff } from "./git.js";
 import { mcpToolGuidance } from "./mcp-guidance.js";
 import { findingValidationBullets, reviewContractBullets, reviewFindingTemplate } from "../review/contract.js";
 import { formatConfigPromptBlock, type ElekConfig } from "../config.js";
@@ -35,6 +35,12 @@ export interface GitHubData {
     headRef: string;
     baseRef: string;
   };
+  /**
+   * Which diff `diff` is, and the commits it was built from (U4). Set only on a PR whose
+   * diff was read; absent otherwise. Never filled from the event payload or `pulls.get`:
+   * see `ReviewedDiffProvenance`.
+   */
+  diffProvenance?: ReviewedDiffProvenance;
 }
 
 /**
@@ -62,7 +68,15 @@ export async function fetchGitHubData(
       baseRef: context.pr.baseRef,
     };
     try {
-      base.diff = getGitDiff(context.pr.baseRef, context.pr.headRef, context.pr.headSha);
+      const local = readGitDiff(context.pr.baseRef, context.pr.headRef, context.pr.headSha);
+      base.diff = local.diff;
+      if (local.diff) {
+        base.diffProvenance = {
+          diffSource: local.diffSource,
+          reviewedHeadSha: local.reviewedHeadSha,
+          reviewedBaseSha: local.reviewedBaseSha,
+        };
+      }
     } catch (err) {
       console.warn("Could not fetch PR diff:", err);
     }
@@ -77,6 +91,10 @@ export async function fetchGitHubData(
         });
         if (typeof response.data === "string") {
           base.diff = response.data;
+          // GitHub's live diff names no commit. Record the source and NO SHA: the PR head
+          // this job resolved is not proof of what GitHub diffed (U4, eha_care #4723).
+          base.diffProvenance = { diffSource: "api" };
+          console.warn("[diff] Using GitHub's live PR diff (diff_source=api); it is bound to no commit.");
         }
       } catch (err) {
         console.warn("Could not fetch PR diff from GitHub:", err);

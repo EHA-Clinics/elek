@@ -3,7 +3,7 @@
  * Calls back on progress events so the orchestrator can update the tracking comment
  * step-by-step, matching the progressive checklist UX users expect.
  *
- * Event format verified against the lockfile-pinned pi 0.84.2:
+ * Event format verified against the lockfile-pinned pi 1.1.0:
  *   - {"type":"session", id, version, ...}                 first line, session header
  *   - {"type":"agent_start"} | {"type":"agent_end", messages:[...]}
  *   - {"type":"turn_start"} | {"type":"turn_end", message, toolResults}
@@ -926,6 +926,11 @@ export function buildPiArgs(
     "--thinking", piThinkingLevel(inputs.thinking),
     "--no-skills",
     "--no-context-files",
+    // pi 1.x: never prompt for or load project-scoped `.pi/*` resources from the
+    // PR checkout, and never start pi's built-in MCP support. The pinned local
+    // pi-mcp-adapter below is loaded explicitly with -e when MCP is needed.
+    "--no-approve",
+    "--no-mcp",
   ];
   // `pi --model provider/model` is legal, but pairing that with a separate
   // `--provider` can make multi-provider review strategies ambiguous. When
@@ -949,10 +954,9 @@ export function buildPiArgs(
     args.push("-e", localPiReasoningCapPath());
   }
 
-  // Empty model string intentionally means "use this provider's default".
-  if (inputs.model) {
-    args.push("--model", inputs.model);
-  }
+  // pi 1.0 rejects --provider without --model. An empty provider-qualified
+  // pattern ("<provider>/") keeps "use this provider's default" for an empty model.
+  args.push("--model", inputs.model || `${inputs.provider}/`);
 
   if (inputs.systemPrompt) {
     args.push("--system-prompt", inputs.systemPrompt);

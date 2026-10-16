@@ -51,18 +51,19 @@ afterEach(() => {
 });
 
 describe("buildPiArgs", () => {
-  it("omits --model when the provider default model is requested", () => {
+  it("passes --model <provider>/ when the provider default model is requested", () => {
     const args = buildPiArgs({ ...baseInputs, model: "" }, "/tmp/prompt.md", false);
 
+    // pi 1.0 rejects --provider without --model; "<provider>/" selects that provider's default.
     expect(args).toContain("--provider");
     expect(args).toContain("deepseek");
-    expect(args).not.toContain("--model");
+    expect(args[args.indexOf("--model") + 1]).toBe("deepseek/");
     expect(args).toContain("--no-extensions");
     expect(args).toContain("--no-builtin-tools");
     expect(args.join(" ")).toContain("src/pi-readonly-tools.ts");
   });
 
-  it("defensively omits --model when model is undefined", () => {
+  it("defensively falls back to --model <provider>/ when model is undefined", () => {
     const args = buildPiArgs(
       { ...baseInputs, model: undefined as unknown as string },
       "/tmp/prompt.md",
@@ -70,7 +71,31 @@ describe("buildPiArgs", () => {
     );
 
     expect(args).toContain("--provider");
-    expect(args).not.toContain("--model");
+    expect(args[args.indexOf("--model") + 1]).toBe("deepseek/");
+  });
+
+  it("passes --no-approve and --no-mcp in every mode buildPiArgs produces", () => {
+    const variants: Array<[string, ActionInputs, boolean]> = [];
+    for (const mode of ["review", "review+edit", "agent"]) {
+      for (const model of ["", "deepseek-v4-pro", "openrouter/z-ai/glm-5.3-flash"]) {
+        for (const tools of ["read,grep,find,ls", "read,write,edit,bash"]) {
+          for (const loadExtensions of [false, true]) {
+            variants.push([
+              `${mode}|${model}|${tools}|${loadExtensions}`,
+              { ...baseInputs, mode, model, tools, openRouterReasoningModes: loadExtensions ? { "x/y": { mode: "effort" } } : undefined } as ActionInputs,
+              loadExtensions,
+            ]);
+          }
+        }
+      }
+    }
+    expect(variants.length).toBe(36);
+    for (const [label, inputs, loadExtensions] of variants) {
+      const args = buildPiArgs(inputs, "/tmp/prompt.md", loadExtensions);
+      expect({ label, noApprove: args.includes("--no-approve") }).toEqual({ label, noApprove: true });
+      expect({ label, noMcp: args.includes("--no-mcp") }).toEqual({ label, noMcp: true });
+      expect({ label, hasModel: args.includes("--model") }).toEqual({ label, hasModel: true });
+    }
   });
 
   it("lets provider-qualified model specs route themselves", () => {

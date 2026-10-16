@@ -54,6 +54,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In council mode the public model label is the VALIDATOR's — the model that
   writes the synthesis — not the primary `model` input, which is a reviewer lens.
 
+### Security
+
+- The review runtime is `@earendil-works/pi-coding-agent` 1.1.0 (was 0.84.2), with
+  every `@earendil-works/*` sibling (chord, pi-agent-core, pi-ai, pi-codemode, pi-mcp,
+  pi-tui, pi-telemetry) pinned to 1.1.0 through `overrides`: pi 1.0.1 dropped its
+  shrinkwrap and 1.1.0 declares caret ranges, which otherwise resolve the 1.3
+  libraries and break `MCP_TYPESCRIPT_PREAMBLE`. Also `@modelcontextprotocol/sdk`
+  1.31.0 and the `undici` 8.10.2 / `brace-expansion` 5.0.12 overrides. The runtime
+  audit (`npm audit --omit=dev --audit-level=high`) is clean: 0 high, 0 critical.
+- pi is started with `--no-approve` and `--no-mcp`, so a PR checkout's `.pi/*`
+  settings, MCP config or extensions are never loaded and pi's built-in MCP never
+  starts; the pinned local `pi-mcp-adapter` is still loaded explicitly when needed.
+- An empty `model` input now passes `--model <provider>/` (pi 1.0 rejects
+  `--provider` without `--model`); it still selects that provider's default model.
+
 ### Added
 
 - Failure class `provider_unavailable` (HTTP 404), split out of

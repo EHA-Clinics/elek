@@ -25,8 +25,8 @@
   "dependencies": {
     "@actions/core": "3.0.1",
     "@actions/github": "9.1.1",
-    "@earendil-works/pi-coding-agent": "0.84.2",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@octokit/rest": "22.0.1",
     "pi-mcp-adapter": "2.15.0",
     "tsx": "4.22.4",
@@ -40,8 +40,15 @@
   },
   "overrides": {
     "@hono/node-server": "2.0.12",
-    "brace-expansion": "5.0.8",
-    "undici": "8.9.0"
+    "brace-expansion": "5.0.12",
+    "undici": "8.10.2",
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-agent-core": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-codemode": "1.1.0",
+    "@earendil-works/pi-mcp": "1.1.0",
+    "@earendil-works/pi-tui": "1.1.0",
+    "@earendil-works/pi-telemetry": "1.1.0"
   },
   "keywords": [
     "github-actions",

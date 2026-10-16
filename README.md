@@ -421,6 +421,12 @@ upload step when you want to compare models or review strategies across CI
 runs. If the runner cannot write the optional file, `review_summary_path` is
 set to an empty string while `review_summary_json` is still emitted.
 
+On a pull request, `entity.diffSource` says which diff was reviewed (`remote`,
+`head` or `api`). For a local git diff, `entity.reviewedHeadSha` and
+`entity.reviewedBaseSha` are the exact commits it was built from. GitHub's API
+diff names no commit, so an `api` summary has neither SHA: a consumer that needs
+to bind a review to a tree must treat it as unbound.
+
 Adjudicate each finding after the implementation agent has handled the PR:
 
 ```bash

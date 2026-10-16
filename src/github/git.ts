@@ -5,7 +5,7 @@
  * - Commit signing
  */
 import { execFileSync, type ExecFileSyncOptions } from "child_process";
-import type { GitHubEntityContext } from "../types";
+import type { GitHubEntityContext, ReviewedDiffProvenance } from "../types";
 
 const GITHUB_SERVER_URL = process.env.GITHUB_SERVER_URL || "https://github.com";
 const maxGitRefLength = 255;
@@ -149,10 +149,57 @@ export function pushBranch(branchName: string): void {
   console.log(`✓ Pushed branch: ${branchName}`);
 }
 
+function resolveCommit(ref: string): string | undefined {
+  try {
+    const resolved = execFileSync("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], {
+      encoding: "utf-8",
+      stdio: "pipe",
+    })
+      .trim()
+      .toLowerCase();
+    return /^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(resolved) ? resolved : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve both sides to commits FIRST, then diff those exact commits, so the
+ * recorded SHAs are by construction the ones the diff was built from. Diffing
+ * `<sha>...<sha>` prints byte-for-byte what `<ref>...<ref>` printed for the same
+ * commits; the only difference is that the SHAs can no longer drift from the diff.
+ */
+function diffCommits(
+  baseRef: string,
+  headRef: string,
+  diffSource: "remote" | "head",
+): GitDiffResult | undefined {
+  const reviewedBaseSha = resolveCommit(baseRef);
+  const reviewedHeadSha = resolveCommit(headRef);
+  if (!reviewedBaseSha || !reviewedHeadSha) return undefined;
+  const diff = diffRange(`${reviewedBaseSha}...${reviewedHeadSha}`);
+  if (diff === undefined) return undefined;
+  return { diff, diffSource, reviewedHeadSha, reviewedBaseSha };
+}
+
+export interface GitDiffResult extends ReviewedDiffProvenance {
+  diff: string;
+  diffSource: "remote" | "head";
+  reviewedHeadSha: string;
+  reviewedBaseSha: string;
+}
+
 /**
  * Get the git diff between two refs.
  */
 export function getGitDiff(baseRef: string, headRef: string, headSha?: string): string {
+  return readGitDiff(baseRef, headRef, headSha).diff;
+}
+
+/**
+ * Get the git diff between two refs, with the commits it was built from (U4).
+ */
+export function readGitDiff(baseRef: string, headRef: string, headSha?: string): GitDiffResult {
   const headRemoteRef = process.env.ELEK_HEAD_REMOTE_REF || headRef;
   assertSafeGitRefName(baseRef, "base ref");
   assertSafeGitRefName(headRef, "head ref");
@@ -165,12 +212,12 @@ export function getGitDiff(baseRef: string, headRef: string, headSha?: string): 
   // verified head SHA prevents comment/review events checked out on the
   // default branch from being mistaken for the PR checkout.
   if (!headSha || refContainsCommit("HEAD", headSha)) {
-    const localHeadDiff = diffRange(`origin/${baseRef}...HEAD`);
+    const localHeadDiff = diffCommits(`origin/${baseRef}`, "HEAD", "head");
     if (localHeadDiff !== undefined) return localHeadDiff;
   }
 
   if (!headSha || refEqualsCommit(`origin/${headRemoteRef}`, headSha)) {
-    const localRemoteDiff = diffRange(`origin/${baseRef}...origin/${headRemoteRef}`);
+    const localRemoteDiff = diffCommits(`origin/${baseRef}`, `origin/${headRemoteRef}`, "remote");
     if (localRemoteDiff !== undefined) return localRemoteDiff;
   }
 

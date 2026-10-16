@@ -382,6 +382,16 @@ async function run(): Promise<void> {
 
   // ── Phase 3: Fetch data & build prompt ───────────────────────────────
   const data = await fetchGitHubData(context, octokit);
+  // U4: record WHICH diff is under review the moment it is read, so every terminal
+  // path after this point (including a failed council) names the reviewed commits.
+  finalizer.update({ diffProvenance: data.diffProvenance });
+  if (data.diffProvenance) {
+    const p = data.diffProvenance;
+    console.log(
+      `[diff] diff_source=${p.diffSource} reviewed_head_sha=${p.reviewedHeadSha ?? "(none)"} ` +
+        `reviewed_base_sha=${p.reviewedBaseSha ?? "(none)"}`,
+    );
+  }
 
   // Include PR review comments for context
   if (context.isPR) {

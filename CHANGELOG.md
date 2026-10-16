@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The review summary names the diff elek actually reviewed (U4): `entity.diffSource`
+  (`remote` = `origin/<base>...origin/<head>`, `head` = `origin/<base>...HEAD`,
+  `api` = GitHub's live PR diff), plus `entity.reviewedHeadSha` and
+  `entity.reviewedBaseSha`, the exact commits passed to `git diff`, resolved when
+  the diff is read. An `api` diff is bound to no commit, so it carries no SHA, and
+  no key is ever filled from the event payload or a placeholder. Additive; `version`
+  stays 1 and no existing key or behaviour changes.
+
 - `validator_run_timeout_seconds` (EHAC-2833): a wall-clock budget for the
   VALIDATOR roles — the `validator-review` audit lens and the final synthesis —
   separate from the reviewer `run_timeout_seconds`. Empty (the default) inherits

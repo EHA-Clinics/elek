@@ -116,6 +116,30 @@ export interface ActionInputs {
   maxCostUsd?: number | null;
 }
 
+/**
+ * Where the PR diff elek reviewed came from, recorded at the moment it was read (U4).
+ *
+ * - `"remote"`: `git diff <base>...<head>` with the head taken from `origin/<head ref>`, verified
+ *   equal to the PR head SHA elek resolved.
+ * - `"head"`: the same, with the head taken from the checked-out `HEAD`, verified to contain the
+ *   PR head SHA. `HEAD` may be a merge commit, so `reviewedHeadSha` is HEAD's own SHA.
+ * - `"api"`: GitHub's live PR diff (`pulls.get`, diff media type). It is bound to NO commit, so
+ *   `reviewedHeadSha` and `reviewedBaseSha` are always absent for it.
+ *
+ * The SHAs are the exact commits passed to `git diff`, resolved immediately before it ran. They
+ * are never copied from the event payload or `pulls.get`, so a branch that moves during the job
+ * cannot make the record name a tree that was not diffed.
+ */
+export type ReviewedDiffSource = "remote" | "head" | "api";
+
+export interface ReviewedDiffProvenance {
+  diffSource: ReviewedDiffSource;
+  /** 40- or 64-hex commit elek diffed as the head. Absent when `diffSource` is `"api"`. */
+  reviewedHeadSha?: string;
+  /** 40- or 64-hex commit elek diffed as the base tip. Absent when `diffSource` is `"api"`. */
+  reviewedBaseSha?: string;
+}
+
 export interface GitHubEntityContext {
   eventName: "pull_request" | "issues" | "issue_comment" | "pull_request_review" | "pull_request_review_comment";
   eventAction: string;

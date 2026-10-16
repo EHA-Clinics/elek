@@ -46,6 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Diff slices are packed source-first and max-min fair (EHAC-2844). When a diff
+  exceeds its prompt budget, every file used to get the same uniform cap, so
+  the slack of small files went unused and tests and docs took budget that
+  production source needed: measured PR diffs 2.7k over budget used 61% of it
+  and still cut source. Budget now goes to tiers in priority order (production
+  source, including deleted source, then tests, config, docs and workflows),
+  shared max-min fairly within a tier with each file capped at 64k, after
+  admitting only files that can get a viable slice. Block overheads are exact,
+  an overview too large for the budget is bounded by priority, and a changed
+  line longer than its slice is shown as a prefix rather than dropped. The
+  full-diff regime is byte-identical.
 - Public review output no longer corrupts model labels. `redactInternalModelLabels`
   applied its terms sequentially, so a term applied after another had been
   substituted matched inside the fresh substitution, and a term that was a

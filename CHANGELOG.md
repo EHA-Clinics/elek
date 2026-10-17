@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **eha-v1.8.0.** `validator_failover_model` (EHAC-3622): an optional, single,
+  caller-pinned model the FINAL validator (the synthesis) fails over to ONCE when its
+  first attempt ends `stall` or `invalid_output`. The failover re-runs the synthesis on
+  the same lens reports; no lens re-runs. eha_care runs 39038897722 (synthesis `stall`
+  after 132.7s, 1 turn, max idle 120.1s) and 39037993447 (synthesis `invalid_output`
+  after 108.7s) each finalized `validator_failed` and discarded ~20 minutes of finished
+  lens work. Empty (the default) keeps the synthesis a single attempt, byte-identical to
+  before. `timeout` never fails over (falsified for validator roles by run 32105023640),
+  nor does `max_turns` or any other class. A pinned model with the validator's identity
+  (last two path segments, as `selectFailoverModel` compares) is refused before any
+  model runs, as a `configuration_error`. The failover's wall clock comes from the LIVE
+  job clock: `min(V, job_timeout_minutes x 60 - 37 - elapsed - 60)`, and it does not run
+  when `job_timeout_minutes` is unset or that is under `min(300s, V)` (300s covers 94 of
+  102 successful deepseek-v4-pro-0813 syntheses). The static serial-budget guard is
+  unchanged. Both attempts are recorded in `attempts` (`attempt: 2`, `failover: true`,
+  `runTimeoutSeconds`), the decisive `modelRuns` validator entry carries
+  `assignedModelLabel`, `actualModelLabel`, `failoverUsed` and `attemptCount`,
+  `retriedLensIds` gains `validator`, and the failed attempt's buffered inline comments
+  are dropped before the failover runs. The pre-run `max_cost_usd` estimate prices the
+  failover synthesis at the pinned model's rates.
 - `validator_review_failover_model` (EHAC-2522): an optional, single, caller-pinned
   model the `validator-review` audit lens fails over to ONCE when its first attempt
   ends `invalid_output`. eha_care #4710 (run 38797605889) breached its council when

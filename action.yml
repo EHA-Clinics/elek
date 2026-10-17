@@ -300,6 +300,21 @@ inputs:
       model's rates. (EHAC-2522)
     required: false
     default: ""
+  validator_failover_model:
+    description: >-
+      Optional ONE model spec the FINAL validator (the synthesis) fails over to,
+      ONCE, when its first attempt ends stall or invalid_output. The failover
+      re-runs the synthesis on the same lens reports; no lens re-runs. Empty
+      (default) keeps the synthesis a single attempt, byte-identical to before.
+      timeout, max_turns and every other class never fail over. A model with the
+      same identity as the validator (last two path segments) is refused before
+      any model runs. The failover gets min(validator budget, what the live job
+      clock leaves after setup and a 60s margin), and does not run when
+      job_timeout_minutes is unset or that is under min(300s, validator budget).
+      It does not enter the serial budget guard. The max_cost_usd pre-run
+      estimate prices it at this model's rates. (EHAC-3622)
+    required: false
+    default: ""
   severity_threshold:
     description: "Prompt-level minimum finding severity to surface: critical, important, or minor. Empty uses .elek.yml or no threshold."
     required: false
@@ -428,6 +443,7 @@ runs:
         INPUT_VALIDATOR_MODEL: ${{ inputs.validator_model }}
         INPUT_VALIDATOR_THINKING: ${{ inputs.validator_thinking }}
         INPUT_VALIDATOR_REVIEW_FAILOVER_MODEL: ${{ inputs.validator_review_failover_model }}
+        INPUT_VALIDATOR_FAILOVER_MODEL: ${{ inputs.validator_failover_model }}
         INPUT_SEVERITY_THRESHOLD: ${{ inputs.severity_threshold }}
         INPUT_SHOW_COST: ${{ inputs.show_cost }}
         INPUT_COST_RATES: ${{ inputs.cost_rates }}

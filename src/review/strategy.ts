@@ -6,8 +6,11 @@ import { formatConfigPromptBlock, normalizeReviewStrategy, type ElekConfig } fro
 import { aggregateCosts, formatUsd, type ReviewCost } from "./cost.js";
 import { diffPromptBudgetChars, formatChangedFilesForPrompt } from "./diff-context.js";
 import {
+  resolveSynthesisRetrySeconds,
   resolveTimeoutRetrySeconds,
+  SYNTHESIS_RETRY_MIN_SECONDS,
   TIMEOUT_RETRY_MIN_SECONDS,
+  type SynthesisRetryBudgetInput,
   type TimeoutRetryBudgetInput,
 } from "./serial-budget.js";
 
@@ -328,6 +331,112 @@ export function resolveLensRetry(params: {
   };
 }
 
+/**
+ * The failure classes on which the FINAL validator (the synthesis) fails over (EHAC-3622).
+ *
+ * Both are properties of the (model, prompt) pair, measured on the synthesis itself:
+ * eha_care run 39038897722 stalled after 132.7s on its first turn (max_idle 120.1s,
+ * last event message_start) and run 39037993447 ended invalid_output after 108.7s. A
+ * different model is a real remedy for both, and each failure threw away ~20 minutes of
+ * finished lens work.
+ *
+ * `timeout` is deliberately absent: the timeout retry was falsified for validator roles by
+ * run 32105023640 (four retries on four models, three timed out again, every attempt
+ * streaming continuously), and its remedy is `validator_run_timeout_seconds`. `max_turns` and every other
+ * class stay blocking too.
+ */
+export const SYNTHESIS_FAILOVER_CLASSES: readonly PiFailureClass[] = Object.freeze(["stall", "invalid_output"]);
+
+/**
+ * Resolve `validator_failover_model` against the effective validator (EHAC-3622).
+ *
+ * An absent or blank value stays undefined (no failover): `parseModelSpec("")` resolves to
+ * the primary model, and a failover nobody configured would change the outcome of every
+ * failed synthesis. A pinned model with the SAME identity as the validator is refused,
+ * compared the way `selectFailoverModel` and `distinctModels` compare models
+ * (`normalizeModelIdentity`: the last two path segments), so
+ * `openrouter/deepseek/deepseek-v4.1-flash` and `deepseek/deepseek-v4.1-flash` are one
+ * model: failing over between them would re-send the prompt that just failed to the model
+ * that just failed it.
+ *
+ * @throws {Error} when the pinned model has the validator's identity.
+ */
+export function resolveValidatorFailoverModel(
+  inputs: Pick<ActionInputs, "provider" | "model" | "validatorFailoverModel">,
+  validator: ModelSpec,
+): ModelSpec | undefined {
+  const raw = inputs.validatorFailoverModel?.trim();
+  if (!raw) return undefined;
+  const pinned = parseModelSpec(raw, inputs);
+  if (normalizeModelIdentity(pinned) === normalizeModelIdentity(validator)) {
+    throw new Error(
+      `Invalid validator_failover_model input: "${raw}" is the same model as the validator ` +
+        `(${validator.label}); models are compared by their last two path segments ` +
+        `("${normalizeModelIdentity(validator)}"). Refusing to run: the failover would re-send ` +
+        "the synthesis that just failed to the model that just failed it. Pin a different model, " +
+        "or leave the input empty.",
+    );
+  }
+  return pinned;
+}
+
+/**
+ * Decide whether the failed FINAL synthesis fails over (EHAC-3622).
+ *
+ * Once, to the pinned model, on `stall` or `invalid_output` only, and only within what the
+ * live job clock can still afford (`resolveSynthesisRetrySeconds`): no provable budget, no
+ * retry. The retry re-runs the SYNTHESIS on the same lens reports; no lens re-runs.
+ */
+export function resolveSynthesisRetry(params: {
+  conclusion: "success" | "failure";
+  failureClass?: PiFailureClass;
+  attemptsSoFar: number;
+  assignedModel: ModelSpec;
+  validatorFailoverModel?: ModelSpec;
+  /** The job's wall-clock state when the attempt ended. Absent means no budget can be proven. */
+  budget?: SynthesisRetryBudgetInput;
+}): LensRetryDecision {
+  const no = (reason: string): LensRetryDecision => ({ retry: false, failover: false, reason });
+
+  if (params.conclusion !== "failure") return no("the attempt succeeded");
+  const pinned = params.validatorFailoverModel;
+  if (!pinned) return no("validator_failover_model is unset; the final synthesis is a single attempt");
+  if (params.attemptsSoFar >= MAX_LENS_ATTEMPTS) {
+    return no(`the retry budget of ${MAX_LENS_ATTEMPTS} attempt(s) is exhausted`);
+  }
+  const failureClass: PiFailureClass = params.failureClass ?? "unknown";
+  if (!SYNTHESIS_FAILOVER_CLASSES.includes(failureClass)) {
+    return no(
+      `failure class "${failureClass}" does not fail the final validator over; only ` +
+        `${SYNTHESIS_FAILOVER_CLASSES.join(" and ")} do`,
+    );
+  }
+  // Preflight already refuses this; kept so the decision never depends on the caller.
+  if (normalizeModelIdentity(pinned) === normalizeModelIdentity(params.assignedModel)) {
+    return no(`validator_failover_model ${pinned.label} is the model that just failed`);
+  }
+  const seconds = params.budget ? resolveSynthesisRetrySeconds(params.budget) : undefined;
+  if (seconds === undefined) {
+    const budget = params.budget;
+    return no(
+      budget?.jobTimeoutMinutes === undefined
+        ? "the final validator fails over only within a provable job budget, and job_timeout_minutes is unset"
+        : `the live job clock cannot cover a failover synthesis: ${Math.round(budget.elapsedSeconds)}s of the ` +
+            `${budget.jobTimeoutMinutes * 60}s job are spent, leaving less than the ` +
+            `${Math.min(SYNTHESIS_RETRY_MIN_SECONDS, Math.floor(budget.validatorSeconds))}s minimum after setup and margin`,
+    );
+  }
+  return {
+    retry: true,
+    model: pinned,
+    failover: true,
+    reason:
+      `failure class "${failureClass}" fails the final validator over once to the pinned ${pinned.label} ` +
+      `with a ${seconds}s per-attempt budget`,
+    runTimeoutSeconds: seconds,
+  };
+}
+
 export interface BudgetPlanEvent {
   level: "log" | "warn";
   message: string;
@@ -528,6 +637,25 @@ export function costEstimateLensJobs(
     return withRetry;
   }
   return [...withRetry, { ...audit, model: validatorReviewFailoverModel }];
+}
+
+/**
+ * The synthesis models the pre-run `max_cost_usd` estimate prices (EHAC-3622): the
+ * validator, plus the pinned final-validator failover when it is a distinct model, so a
+ * cap is never exceeded by an attempt the estimate never saw. With no failover pinned the
+ * list is exactly the validator, as before.
+ */
+export function costEstimateSynthesisModels(
+  validator: ModelSpec,
+  validatorFailoverModel: ModelSpec | undefined,
+): ModelSpec[] {
+  if (
+    !validatorFailoverModel ||
+    normalizeModelIdentity(validatorFailoverModel) === normalizeModelIdentity(validator)
+  ) {
+    return [validator];
+  }
+  return [validator, validatorFailoverModel];
 }
 
 /** The single most expensive next-distinct-model replacement across reviewer jobs. */

@@ -59,7 +59,9 @@ import {
   buildSynthesisPrompt,
   resolveReviewPlan,
   costEstimateLensJobs,
+  costEstimateSynthesisModels,
   resolveReviewPlanSupport,
+  resolveValidatorFailoverModel,
   resolveValidatorReviewFailoverModel,
   selectReviewPlanWithinBudget,
   type DiffPromptBudgetReport,
@@ -81,6 +83,7 @@ import {
   type ReviewRunMetric,
 } from "../review/summary.js";
 import { executeLensWithRetry, type LensAttemptOverrides } from "../review/lens-execution.js";
+import { executeSynthesisWithFailover, type SynthesisAttemptOverrides } from "../review/synthesis-execution.js";
 import { resolveRoleTimeouts } from "../review/role-timeouts.js";
 import {
   evaluateCouncilPolicy,
@@ -368,6 +371,30 @@ async function run(): Promise<void> {
   });
   if (reviewPlanSupport.warning) console.warn(reviewPlanSupport.warning);
 
+  // The caller-pinned final-validator failover (EHAC-3622), checked against the EFFECTIVE
+  // validator (`.elek.yml` can supply it) before any model runs. A failover onto the
+  // validator's own identity is a configuration error, not a retry.
+  let validatorFailoverModel: ModelSpec | undefined;
+  try {
+    validatorFailoverModel = resolveValidatorFailoverModel(inputs, reviewPlan.validator);
+  } catch (err) {
+    const failureMessage = err instanceof Error ? err.message : String(err);
+    console.error("Configuration error:", failureMessage);
+    core.setFailed(failureMessage);
+    finalizer.finalize({
+      conclusion: "failure",
+      terminalReason: "configuration_error",
+      failureMessage,
+    });
+    return;
+  }
+  if (validatorFailoverModel) {
+    console.log(
+      `[config] validator_failover_model=${validatorFailoverModel.label} ` +
+        "(a final synthesis ending stall or invalid_output fails over once, within the live job clock)",
+    );
+  }
+
   let trackingModelLabel = reviewPlanSupport.enabled ? reviewPlan.validator.label : modelLabel;
   publicModelLabel = publicModelLabelFor(trackingModelLabel);
 
@@ -551,25 +578,29 @@ async function run(): Promise<void> {
       costRates: inputs.costRates,
     });
     const lensCosts = costEstimateLensJobs(plan, validatorReviewFailoverModel, (job) => priceLensJob(job).costUsd).map(priceLensJob);
-    const synthesisCost = estimatePromptOnlyCost({
-      modelLabel: plan.validator.label,
-      prompt: buildSynthesisPrompt({
-        data,
-        userRequest,
-        modelLabel: plan.validator.label,
-        jobRunLink,
-        commentId,
-        reports: reviewerJobs.map((job) => ({
-          lens: job.lens,
-          modelLabel: job.model.label,
-          output: "(candidate report pending)",
-          conclusion: "success",
-        })),
-        repoConfig: effectiveRepoConfig,
+    // The synthesis, plus the pinned final-validator failover when one is set (EHAC-3622),
+    // each at its own model's rates on its own prompt.
+    const synthesisCosts = costEstimateSynthesisModels(plan.validator, validatorFailoverModel).map((model) =>
+      estimatePromptOnlyCost({
+        modelLabel: model.label,
+        prompt: buildSynthesisPrompt({
+          data,
+          userRequest,
+          modelLabel: model.label,
+          jobRunLink,
+          commentId,
+          reports: reviewerJobs.map((job) => ({
+            lens: job.lens,
+            modelLabel: job.model.label,
+            output: "(candidate report pending)",
+            conclusion: "success",
+          })),
+          repoConfig: effectiveRepoConfig,
+        }),
+        costRates: inputs.costRates,
       }),
-      costRates: inputs.costRates,
-    });
-    return [...lensCosts, synthesisCost];
+    );
+    return [...lensCosts, ...synthesisCosts];
   };
 
   if (reviewPlanSupport.enabled && inputs.maxCostUsd !== undefined) {
@@ -640,6 +671,9 @@ async function run(): Promise<void> {
   let councilPolicy: CouncilPolicyResult | undefined;
 
   let finalInputs = piInputs;
+  // Builds the synthesis prompt for the final-validator failover on the SAME lens reports
+  // (EHAC-3622). Set only for a review plan: solo has no synthesis to fail over.
+  let failoverPromptFor: ((model: ModelSpec) => string) | undefined;
   if (useReviewPlan) {
     const lensTools = resolveMode("review").piTools
       .split(",")
@@ -905,39 +939,99 @@ async function run(): Promise<void> {
       publicModelLabel,
     });
     writeFileSync(join(promptDir, "prompt.md"), prompt, "utf-8");
+    failoverPromptFor = (model) =>
+      buildSynthesisPrompt({
+        data,
+        userRequest,
+        modelLabel: model.label,
+        jobRunLink,
+        commentId,
+        reports,
+        repoConfig: effectiveRepoConfig,
+        publicModelLabel: publicModelLabelFor(model.label),
+      });
   }
 
-  let result: PiRunResult = {
-    conclusion: "failure",
-    output: "MCP configuration failed",
-    turnsUsed: 0,
-    providerRetries: 0,
-    durationSeconds: 0,
-    costUsd: 0,
-    usage: {
-      inputTokens: 0,
-      outputTokens: 0,
-      estimated: true,
-      modelLabel: activeModelLabel,
-      source: "unknown",
-    },
-  };
-  const finalCostIndex = runCosts.push(costFromPiResult(result)) - 1;
-  try {
-    writeMcpConfig();
-    result = await runPi(prompt, finalInputs, onProgress, mcpEnabled, { promptName: "prompt" });
-    runCosts[finalCostIndex] = costFromPiResult(result);
-  } catch (err) {
-    result = {
-      ...result,
-      output: `Review execution failed: ${(err as Error).message}`,
+  const finalModel: ModelSpec = useReviewPlan
+    ? reviewPlan.validator
+    : { provider: finalInputs.provider, model: finalInputs.model, label: activeModelLabel };
+  // One physical final attempt. Each attempt gets its own MCP config, dropped the moment pi
+  // exits, and its own cost line: a failover spends real money and the report must show it.
+  const runFinalAttempt = async (
+    model: ModelSpec,
+    promptName: string,
+    overrides?: SynthesisAttemptOverrides,
+  ): Promise<PiRunResult> => {
+    activeModelLabel = model.label;
+    let attemptResult: PiRunResult = {
+      conclusion: "failure",
+      output: "MCP configuration failed",
+      turnsUsed: 0,
+      providerRetries: 0,
+      durationSeconds: 0,
+      costUsd: 0,
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        estimated: true,
+        modelLabel: model.label,
+        source: "unknown",
+      },
     };
-  } finally {
-    // Drop the MCP config (carries GITHUB_TOKEN) the moment pi exits.
-    if (mcpConfigPath) {
-      try { unlinkSync(mcpConfigPath); } catch { /* already gone */ }
+    try {
+      writeMcpConfig();
+      attemptResult = await runPi(
+        model === finalModel ? prompt : (failoverPromptFor?.(model) ?? prompt),
+        {
+          ...finalInputs,
+          provider: model.provider,
+          model: model.model,
+          ...(overrides?.runTimeoutSeconds !== undefined ? { runTimeoutSeconds: overrides.runTimeoutSeconds } : {}),
+        },
+        onProgress,
+        mcpEnabled,
+        { promptName },
+      );
+    } catch (err) {
+      attemptResult = {
+        ...attemptResult,
+        output: `Review execution failed: ${(err as Error).message}`,
+      };
+    } finally {
+      // Drop the MCP config (carries GITHUB_TOKEN) the moment pi exits.
+      if (mcpConfigPath) {
+        try { unlinkSync(mcpConfigPath); } catch { /* already gone */ }
+      }
     }
-  }
+    runCosts.push(costFromPiResult(attemptResult));
+    return attemptResult;
+  };
+
+  // EHAC-3622: a synthesis that ends stall or invalid_output fails over ONCE to the pinned
+  // validator_failover_model, on the same lens reports, within what the live job clock
+  // still affords. Unset, this is the single attempt it always was.
+  const synthesis = await executeSynthesisWithFailover({
+    validator: finalModel,
+    validatorFailoverModel: useReviewPlan ? validatorFailoverModel : undefined,
+    deps: {
+      runAttempt: runFinalAttempt,
+      retryBudget: () => ({
+        validatorSeconds: roleTimeouts.validator,
+        jobTimeoutMinutes: parsedInputs.jobTimeoutMinutes,
+        elapsedSeconds: (Date.now() - actionStartedAt.getTime()) / 1000,
+      }),
+      // The failed attempt's buffered inline comments were never validated by a
+      // successful synthesis; only the decisive attempt's findings are posted.
+      beforeRetry: () => {
+        try { unlinkSync(bufferPath); } catch { /* nothing buffered */ }
+      },
+      log: (message) => console.log(message),
+      warn: (message) => console.warn(message),
+    },
+  });
+  const result = synthesis.result;
+  activeModelLabel = synthesis.activeModel.label;
+  if (synthesis.retried) retriedLensIdsForSummary = [...retriedLensIdsForSummary, "validator"];
 
   console.log(`── pi ${result.conclusion === "success" ? "completed" : "failed"} ──`);
   const safeOutput = sanitize(result.output);
@@ -965,45 +1059,18 @@ async function run(): Promise<void> {
     );
   }
   const parsedFindings = parseReviewFindings(publicOutput);
+  // ONE decisive validator run, as for a lens: the failover is described on it (assigned vs
+  // actual model, attempt count), never split into a second logical run.
   runMetrics.push(metricFromPiRun(result, "validator", {
-    assignedModelLabel: activeModelLabel,
+    assignedModelLabel: finalModel.label,
     actualModelLabel: activeModelLabel,
-    failoverUsed: false,
-    attemptCount: 1,
+    failoverUsed: synthesis.failoverUsed,
+    attemptCount: synthesis.attempts.length,
   }));
-  // The final synthesis is one physical attempt too. Recording it keeps the
-  // attempt history a COMPLETE account of what ran, rather than one that silently
-  // stops at the reviewer wave.
-  attemptMetrics.push({
-    lensId: "validator",
-    lensTitle: "Orchestrator synthesis",
-    role: "validator",
-    attempt: 1,
-    assignedModel: activeModelLabel,
-    actualModel: result.usage.modelLabel || activeModelLabel,
-    ...(result.reasoning ? { reasoning: result.reasoning } : {}),
-    failover: false,
-    conclusion: result.conclusion,
-    ...(result.failureClass ? { failureClass: result.failureClass } : {}),
-    ...(result.providerHttpStatus !== undefined
-      ? { providerHttpStatus: result.providerHttpStatus }
-      : {}),
-    ...(result.providerIneligibilityReasons
-      ? { providerIneligibilityReasons: result.providerIneligibilityReasons }
-      : {}),
-    ...(result.terminationReason ? { terminationReason: result.terminationReason } : {}),
-    durationSeconds: Math.round(Math.max(0, result.durationSeconds) * 10) / 10,
-    turnsUsed: result.turnsUsed,
-    providerRetries: result.providerRetries,
-    inputTokens: result.usage.inputTokens,
-    outputTokens: result.usage.outputTokens,
-    costUsd: Math.round(Math.max(0, result.costUsd) * 1_000_000) / 1_000_000,
-    timeToFirstEventSeconds: result.timeToFirstEventSeconds ?? null,
-    maxIdleSecondsObserved: result.maxIdleSecondsObserved ?? 0,
-    streamEventCount: result.streamEventCount ?? 0,
-    malformedLineCount: result.malformedLineCount ?? 0,
-    ...(result.lastEventType ? { lastEventType: result.lastEventType } : {}),
-  });
+  // Every physical synthesis attempt. Recording them keeps the attempt history a
+  // COMPLETE account of what ran, rather than one that silently stops at the reviewer
+  // wave or hides the failed first synthesis behind a successful failover.
+  attemptMetrics.push(...synthesis.attemptMetrics);
   const costTotal = aggregateCosts(runCosts);
   const costLine = inputs.showCost ? formatCostLine(costTotal) : "";
   if (result.output) {

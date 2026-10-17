@@ -220,6 +220,30 @@ export function parseValidatorReviewFailoverModelInput(value: string): string | 
 }
 
 /**
+ * Parse `validator_failover_model`, FAILING CLOSED on a list (EHAC-3622).
+ *
+ * Same doctrine as `parseValidatorReviewFailoverModelInput`: empty is the shipped default
+ * (the final synthesis stays a single attempt), and a comma or whitespace means a list,
+ * which would run the last model of the review on a model nobody chose. Whether the
+ * model is distinct from the validator is checked once the validator is known
+ * (`resolveValidatorFailoverModel`), because `.elek.yml` can still supply it.
+ *
+ * @throws {Error} when the value is present and is not a single model spec.
+ */
+export function parseValidatorFailoverModelInput(value: string): string | undefined {
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  if (/[\s,]/.test(normalized)) {
+    throw new Error(
+      `Invalid validator_failover_model input: "${normalized}". ` +
+        "Expected ONE model spec (e.g. openrouter/deepseek/deepseek-v4-pro-0813), not a list. " +
+        "Refusing to run: the final-validator failover is a single pinned model.",
+    );
+  }
+  return normalized;
+}
+
+/**
  * Parse `reasoning_max_tokens`, FAILING CLOSED on anything unreadable.
  *
  * Same doctrine as the two safety parsers above. An EMPTY value is not a
@@ -308,6 +332,7 @@ export function parseInputs(): ActionInputs {
     validatorReviewFailoverModel: parseValidatorReviewFailoverModelInput(
       core.getInput("validator_review_failover_model"),
     ),
+    validatorFailoverModel: parseValidatorFailoverModelInput(core.getInput("validator_failover_model")),
     severityThreshold: parseSeverityInput(core.getInput("severity_threshold")),
     showCost: parseBooleanInput(core.getInput("show_cost"), true),
     costRates: core.getInput("cost_rates") || "",

@@ -422,7 +422,10 @@ export function resolveSynthesisRetry(params: {
     return no(
       budget?.jobTimeoutMinutes === undefined
         ? "the final validator fails over only within a provable job budget, and job_timeout_minutes is unset"
-        : `the live job clock cannot cover a failover synthesis: ${Math.round(synthesisRetrySpentSeconds(budget))}s of the ` +
+        : budget.jobElapsedSeconds === undefined
+          ? "the final validator fails over only within a provable job budget, and the job's start cannot be " +
+            "measured (no Runner.Worker ancestor process and no ELEK_JOB_STARTED_AT)"
+          : `the live job clock cannot cover a failover synthesis: ${Math.round(synthesisRetrySpentSeconds(budget))}s of the ` +
             `${budget.jobTimeoutMinutes * 60}s job are spent, leaving less than the ` +
             `${Math.min(SYNTHESIS_RETRY_MIN_SECONDS, Math.floor(budget.validatorSeconds))}s minimum after the margin`,
     );

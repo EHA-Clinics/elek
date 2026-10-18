@@ -12,7 +12,7 @@
  * summary it writes. The pure contract is in final-validator-failover.test.ts.
  */
 import { describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -41,8 +41,8 @@ interface HarnessRun {
 function runOrchestrator(params: {
   synthesis: Array<Record<string, unknown>>;
   inputs?: Record<string, string>;
-  /** Backdate the event payload, which the runner writes at job setup, by this many seconds. */
-  eventAgeSeconds?: number;
+  /** When the job started, in seconds before now (`ELEK_JOB_STARTED_AT`). Default: now. */
+  jobStartedSecondsAgo?: number;
 }): HarnessRun {
   const dir = mkdtempSync(join(tmpdir(), "elek-harness-"));
   const eventPath = join(dir, "event.json");
@@ -61,10 +61,6 @@ function runOrchestrator(params: {
       },
     }),
   );
-  if (params.eventAgeSeconds !== undefined) {
-    const then = new Date(Date.now() - params.eventAgeSeconds * 1000);
-    utimesSync(eventPath, then, then);
-  }
   const callsPath = join(dir, "calls.jsonl");
   const inputs: Record<string, string> = {
     PROVIDER: "openrouter",
@@ -96,6 +92,9 @@ function runOrchestrator(params: {
     GITHUB_RUN_ID: "1",
     // A placeholder: octokit is replaced in the preload and never sends it anywhere.
     GITHUB_TOKEN: "harness-placeholder",
+    // The measured job start. On a GitHub runner the Runner.Worker ancestor is also found,
+    // and the EARLIER of the two wins, which only ever shrinks the failover budget.
+    ELEK_JOB_STARTED_AT: String(Math.floor(Date.now() / 1000) - (params.jobStartedSecondsAgo ?? 0)),
     ELEK_HARNESS_SCRIPT: JSON.stringify({ synthesis: params.synthesis }),
     ELEK_HARNESS_CALLS: callsPath,
   };
@@ -220,11 +219,11 @@ describe("orchestrator end to end: the final validator fails over once (EHAC-362
   });
 
   it("the MEASURED job clock near the cap: NO failover, and the log says why", () => {
-    // The runner wrote the event payload 3600s ago; 3900 - 3600 - 60 = 240 < 300.
+    // The job started 3600s ago, though the action itself only just did: 3900 - 3600 - 60 = 240 < 300.
     const run = runOrchestrator({
       synthesis: [stall, {}],
       inputs: { VALIDATOR_FAILOVER_MODEL: PRO },
-      eventAgeSeconds: 3600,
+      jobStartedSecondsAgo: 3600,
     });
 
     expect(run.summary.review.terminalReason).toBe("validator_failed");

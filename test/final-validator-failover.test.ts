@@ -40,11 +40,16 @@ const PRO: ModelSpec = {
   label: "openrouter/deepseek/deepseek-v4-pro-0813",
 };
 
-/** The org config: V = 1200s, job_timeout_minutes = 65. */
+/**
+ * The org config: V = 1200s, job_timeout_minutes = 65. The measured job clock defaults to
+ * exactly `37 + elapsed` (the steps before the action took the 37s the constant assumes),
+ * so the arithmetic below reads the same either way.
+ */
 const clock = (elapsedSeconds: number, overrides: Partial<SynthesisRetryBudgetInput> = {}): SynthesisRetryBudgetInput => ({
   validatorSeconds: 1200,
   jobTimeoutMinutes: 65,
   elapsedSeconds,
+  jobElapsedSeconds: 37 + elapsedSeconds,
   ...overrides,
 });
 
@@ -315,7 +320,18 @@ describe("resolveSynthesisRetrySeconds: the live-clock gate (EHAC-3622)", () => 
     expect(resolveSynthesisRetrySeconds(clock(3000, { jobElapsedSeconds: 3200 }))).toBe(640);
     // A measured clock SHORTER than setup + elapsed never grows the budget.
     expect(resolveSynthesisRetrySeconds(clock(3000, { jobElapsedSeconds: 100 }))).toBe(803);
-    expect(resolveSynthesisRetrySeconds(clock(3000, { jobElapsedSeconds: Number.NaN }))).toBe(803);
+  });
+
+  it("an UNMEASURABLE job start proves nothing: no failover, and the log says why", async () => {
+    expect(resolveSynthesisRetrySeconds(clock(10, { jobElapsedSeconds: undefined }))).toBeUndefined();
+    expect(resolveSynthesisRetrySeconds(clock(10, { jobElapsedSeconds: Number.NaN }))).toBeUndefined();
+    const { run, logs } = await synthesize({
+      results: [fail(FLASH.label, "stall"), piResult(PRO.label)],
+      pinned: PRO,
+      budget: { jobElapsedSeconds: undefined },
+    });
+    expect(run.calls).toHaveLength(1);
+    expect(logs[0]).toContain("the job's start cannot be measured");
   });
 
   it(`refuses below the ${SYNTHESIS_RETRY_MIN_SECONDS}s floor, at the boundary exactly`, () => {

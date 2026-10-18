@@ -240,11 +240,11 @@ export interface SynthesisRetryBudgetInput {
   /** Wall clock already spent inside the action, from its start, read when attempt 1 ended. */
   elapsedSeconds: number;
   /**
-   * Wall clock since the JOB started, when the runner lets it be measured (run.ts reads the
-   * mtime of the event payload the runner writes while setting the job up). Absent or
-   * unreadable: only `setup + elapsed` is counted.
+   * Wall clock since the JOB started, measured (`measuredJobElapsedSeconds`: the runner's
+   * per-job worker process, or `ELEK_JOB_STARTED_AT`). Undefined when the job's start cannot
+   * be measured, and then no failover runs: nothing can be proven to fit.
    */
-  jobElapsedSeconds?: number;
+  jobElapsedSeconds: number | undefined;
   setupSeconds?: number;
   marginSeconds?: number;
   minSeconds?: number;
@@ -257,6 +257,7 @@ export function synthesisRetrySpentSeconds({
   setupSeconds = SETUP_SECONDS,
 }: Pick<SynthesisRetryBudgetInput, "elapsedSeconds" | "jobElapsedSeconds" | "setupSeconds">): number {
   const measured = jobElapsedSeconds !== undefined && Number.isFinite(jobElapsedSeconds) ? jobElapsedSeconds : 0;
+  // Both are lower bounds on the true job clock; the larger is the safer one.
   return Math.max(setupSeconds + elapsedSeconds, measured);
 }
 
@@ -266,10 +267,10 @@ export function synthesisRetrySpentSeconds({
  *   spent = max(setup + elapsed, jobElapsed)
  *   S2    = min(V, jobTimeoutMinutes x 60 - spent - margin)
  *
- * `setup` (37s) is a constant for the job steps before the action; when the job's own
- * start can be measured, the larger of the two is used, so steps that ran longer than 37s
- * (a slow checkout, a cold `npm ci`) shrink the failover instead of pushing the job past
- * its cap. Measured on eha_care run 39038897722: 40s from job start to the action.
+ * `jobElapsed` is the MEASURED job clock (`src/review/job-clock.ts`), so steps before the
+ * action that ran longer than the 37s `setup` constant (a slow checkout, a cold `npm ci`;
+ * 40s on eha_care run 39038897722) shrink the failover instead of pushing the job past its
+ * cap. `setup + elapsed` is kept as a floor under it.
  *
  * The synthesis is the last model run, so nothing after it needs reserving beyond the
  * margin (posting the review, draining inline comments, the caller's coverage steps:
@@ -279,9 +280,9 @@ export function synthesisRetrySpentSeconds({
  * made about how long the failed attempt took — a stall can arrive after 120s or after
  * most of V.
  *
- * Returns undefined, meaning NO retry, when the job cap is unknown (nothing can be
- * proven to fit) or S2 is below `min(minSeconds, V)`. Pure; the caller supplies
- * `elapsedSeconds` from its own clock.
+ * Returns undefined, meaning NO retry, when the job cap or the job's start is unknown
+ * (nothing can be proven to fit) or S2 is below `min(minSeconds, V)`. Pure; the caller
+ * supplies both clocks.
  */
 export function resolveSynthesisRetrySeconds({
   validatorSeconds,
@@ -292,8 +293,8 @@ export function resolveSynthesisRetrySeconds({
   marginSeconds = TIMEOUT_RETRY_MARGIN_SECONDS,
   minSeconds = SYNTHESIS_RETRY_MIN_SECONDS,
 }: SynthesisRetryBudgetInput): number | undefined {
-  if (jobTimeoutMinutes === undefined) return undefined;
-  if (![validatorSeconds, jobTimeoutMinutes, elapsedSeconds].every(Number.isFinite)) return undefined;
+  if (jobTimeoutMinutes === undefined || jobElapsedSeconds === undefined) return undefined;
+  if (![validatorSeconds, jobTimeoutMinutes, elapsedSeconds, jobElapsedSeconds].every(Number.isFinite)) return undefined;
   const v = Math.floor(validatorSeconds);
   const spent = synthesisRetrySpentSeconds({ elapsedSeconds, jobElapsedSeconds, setupSeconds });
   const remaining = Math.floor(jobTimeoutMinutes * 60 - spent - marginSeconds);

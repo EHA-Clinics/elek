@@ -645,19 +645,20 @@ export function costEstimateLensJobs(
 
 /**
  * The synthesis models the pre-run `max_cost_usd` estimate prices (EHAC-3622): the
- * validator, plus the pinned final-validator failover when it can actually run (a distinct
- * model and a known job cap, without which `resolveSynthesisRetry` never retries), so a cap
+ * validator, plus the pinned final-validator failover when it can actually run, so a cap
  * is never exceeded by an attempt the estimate never saw, nor spent on one that cannot
- * happen. With no failover pinned the list is exactly the validator, as before.
+ * happen. `failoverBudgetProvable` is the same precondition `resolveSynthesisRetrySeconds`
+ * enforces: a job cap is set AND the job clock is measurable. With no failover pinned the
+ * list is exactly the validator, as before.
  */
 export function costEstimateSynthesisModels(
   validator: ModelSpec,
   validatorFailoverModel: ModelSpec | undefined,
-  jobTimeoutMinutes: number | undefined,
+  failoverBudgetProvable: boolean,
 ): ModelSpec[] {
   if (
     !validatorFailoverModel ||
-    jobTimeoutMinutes === undefined ||
+    !failoverBudgetProvable ||
     normalizeModelIdentity(validatorFailoverModel) === normalizeModelIdentity(validator)
   ) {
     return [validator];

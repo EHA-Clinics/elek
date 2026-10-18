@@ -30,8 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `runTimeoutSeconds`), the decisive `modelRuns` validator entry carries
   `assignedModelLabel`, `actualModelLabel`, `failoverUsed` and `attemptCount`,
   `retriedLensIds` gains `validator`, and the failed attempt's buffered inline comments
-  are dropped before the failover runs. When the failover can run (a job cap is set), the
-  pre-run `max_cost_usd` estimate prices it at the pinned model's rates.
+  are dropped before the failover runs. When the failover can run (a job cap is set and the
+  job clock is measurable), the pre-run `max_cost_usd` estimate prices it at the pinned
+  model's rates.
 - `validator_review_failover_model` (EHAC-2522): an optional, single, caller-pinned
   model the `validator-review` audit lens fails over to ONCE when its first attempt
   ends `invalid_output`. eha_care #4710 (run 38797605889) breached its council when

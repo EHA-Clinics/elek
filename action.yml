@@ -314,8 +314,8 @@ inputs:
       does not run when job_timeout_minutes is unset, the job's start cannot be
       measured (container jobs, macOS, Windows), or the budget is under
       min(300s, validator budget). It does not enter the serial
-      budget guard. When it can run, the max_cost_usd pre-run estimate prices
-      it at this model's rates. (EHAC-3622)
+      budget guard. When it can run (job cap set, job clock measurable), the
+      max_cost_usd pre-run estimate prices it at this model's rates. (EHAC-3622)
     required: false
     default: ""
   severity_threshold:

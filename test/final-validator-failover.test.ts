@@ -23,11 +23,17 @@ import {
   costEstimateSynthesisModels,
   resolveSynthesisRetry,
   resolveValidatorFailoverModel,
+  selectReviewPlanWithinBudget,
   SYNTHESIS_FAILOVER_CLASSES,
   type ModelSpec,
+  type ReviewJob,
+  type ReviewPlan,
 } from "../src/review/strategy";
+import { estimatePromptOnlyCost } from "../src/review/cost";
 import { executeSynthesisWithFailover, type SynthesisAttemptOverrides } from "../src/review/synthesis-execution";
-import type { PiFailureClass, PiRunResult } from "../src/types";
+import type { ActionInputs, PiFailureClass, PiRunResult } from "../src/types";
+
+const RATES = "openrouter/deepseek/deepseek-v4.1-flash=0.30:1.20,openrouter/deepseek/deepseek-v4-pro-0813=1.32:3.96";
 
 const FLASH: ModelSpec = {
   provider: "openrouter",
@@ -397,18 +403,49 @@ describe("budgets outside the live clock (EHAC-3622)", () => {
   });
 
   it("the max_cost_usd estimate prices the pinned failover synthesis only when it can run", () => {
-    expect(costEstimateSynthesisModels(FLASH, undefined, 65)).toEqual([FLASH]);
-    expect(costEstimateSynthesisModels(FLASH, PRO, 65)).toEqual([FLASH, PRO]);
-    // No job cap: the failover can never run, so it is not reserved for.
-    expect(costEstimateSynthesisModels(FLASH, PRO, undefined)).toEqual([FLASH]);
+    expect(costEstimateSynthesisModels(FLASH, undefined, true)).toEqual([FLASH]);
+    expect(costEstimateSynthesisModels(FLASH, PRO, true)).toEqual([FLASH, PRO]);
+    // No job cap, or no measurable job clock: the failover can never run, so it is not reserved for.
+    expect(costEstimateSynthesisModels(FLASH, PRO, false)).toEqual([FLASH]);
     const sameOtherRoute: ModelSpec = { provider: "deepseek", model: "deepseek/deepseek-v4.1-flash", label: "deepseek/deepseek-v4.1-flash" };
-    expect(costEstimateSynthesisModels(FLASH, sameOtherRoute, 65)).toEqual([FLASH]);
+    expect(costEstimateSynthesisModels(FLASH, sameOtherRoute, true)).toEqual([FLASH]);
+  });
+
+  it("a cap between the single and the failover estimate downgrades only when the failover can run", () => {
+    const job = (id: string): ReviewJob => ({ lens: { id, title: id, focus: id }, model: FLASH, role: "reviewer" });
+    const plan: ReviewPlan = { strategy: "crosscheck", jobs: [job("risk"), job("design")], validator: FLASH, reusedModels: true };
+    const PROMPT = "x".repeat(400_000); // 100,000 estimated input tokens
+    const price = (model: ModelSpec) => estimatePromptOnlyCost({ modelLabel: model.label, prompt: PROMPT, costRates: RATES });
+    const estimate = (provable: boolean) => (p: ReviewPlan) => [
+      ...p.jobs.map((j) => price(j.model)),
+      ...costEstimateSynthesisModels(p.validator, PRO, provable).map(price),
+    ];
+    // 3 x 100k at $0.30/M = $0.09 without the failover; + 100k at $1.32/M = $0.222 with it.
+    const inputs = {
+      maxCostUsd: 0.15,
+      provider: "openrouter",
+      model: FLASH.model,
+      reviewStrategy: "crosscheck",
+      reviewModels: "",
+      reviewLenses: "",
+      validatorModel: FLASH.model,
+      advisorModel: "off",
+      costRates: RATES,
+    } as unknown as ActionInputs;
+    const ctx = { isPR: true, mode: "review" };
+    const unprovable = selectReviewPlanWithinBudget({ inputs, initialPlan: plan, supportContext: ctx, estimateCosts: estimate(false) });
+    const provable = selectReviewPlanWithinBudget({ inputs, initialPlan: plan, supportContext: ctx, estimateCosts: estimate(true) });
+    expect(unprovable.plan.strategy).toBe("crosscheck");
+    expect(provable.plan.strategy).not.toBe("crosscheck");
   });
 
   it("run.ts prices the pre-run estimate through costEstimateSynthesisModels with the pinned model", () => {
     const run = readFileSync(join(import.meta.dir, "..", "src", "entrypoints", "run.ts"), "utf-8");
     expect(run).toMatch(
-      /const estimatePlannedInputCost = [\s\S]*?costEstimateSynthesisModels\(plan\.validator, validatorFailoverModel, parsedInputs\.jobTimeoutMinutes\)\.map\(/,
+      /const estimatePlannedInputCost = [\s\S]*?costEstimateSynthesisModels\(plan\.validator, validatorFailoverModel, failoverBudgetProvable\)\.map\(/,
+    );
+    expect(run).toMatch(
+      /const failoverBudgetProvable =\s*validatorFailoverModel !== undefined &&\s*parsedInputs\.jobTimeoutMinutes !== undefined &&\s*measuredJobElapsedSeconds\(\) !== undefined;/,
     );
   });
 });

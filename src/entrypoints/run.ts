@@ -563,6 +563,13 @@ async function run(): Promise<void> {
   // The caller-pinned validator-review failover for invalid_output ONLY
   // (EHAC-2522). Undefined unless the caller set it; never the roster.
   const validatorReviewFailoverModel = resolveValidatorReviewFailoverModel(inputs);
+  // Whether a final-validator failover could ever be budgeted on this runner: the same two
+  // preconditions resolveSynthesisRetrySeconds enforces at run time (a job cap, and a
+  // measurable job clock). The cost estimate reserves the failover only when both hold.
+  const failoverBudgetProvable =
+    validatorFailoverModel !== undefined &&
+    parsedInputs.jobTimeoutMinutes !== undefined &&
+    measuredJobElapsedSeconds() !== undefined;
 
   const estimatePlannedInputCost = (plan: ReviewPlan): ReviewCost[] => {
     // Defensive only: the budget selector stops before estimating solo plans.
@@ -581,7 +588,7 @@ async function run(): Promise<void> {
     const lensCosts = costEstimateLensJobs(plan, validatorReviewFailoverModel, (job) => priceLensJob(job).costUsd).map(priceLensJob);
     // The synthesis, plus the pinned final-validator failover when one is set (EHAC-3622),
     // each at its own model's rates on its own prompt.
-    const synthesisCosts = costEstimateSynthesisModels(plan.validator, validatorFailoverModel, parsedInputs.jobTimeoutMinutes).map((model) =>
+    const synthesisCosts = costEstimateSynthesisModels(plan.validator, validatorFailoverModel, failoverBudgetProvable).map((model) =>
       estimatePromptOnlyCost({
         modelLabel: model.label,
         prompt: buildSynthesisPrompt({

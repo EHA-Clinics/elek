@@ -15,7 +15,7 @@
  *   ELEK_HARNESS_JOB_STARTED_AT_MS  when the job started (epoch ms); unset = unmeasurable.
  */
 import { mock } from "bun:test";
-import { appendFileSync } from "fs";
+import { appendFileSync, existsSync } from "fs";
 
 const src = new URL("../../src/", import.meta.url).pathname;
 const script = JSON.parse(process.env.ELEK_HARNESS_SCRIPT || "{}") as {
@@ -91,14 +91,17 @@ mock.module(`${src}github/comments.ts`, () => ({
 
 // The job clock. On a real runner it is the Runner.Worker ancestor's age (test/job-clock.test.ts
 // proves that in CI); here the test sets when the job started, so a run near the cap is reachable.
-const realJobClock = await import(`${src}review/job-clock.ts`);
-mock.module(`${src}review/job-clock.ts`, () => ({
-  ...realJobClock,
-  measuredJobElapsedSeconds: () => {
-    const startedAt = Number(process.env.ELEK_HARNESS_JOB_STARTED_AT_MS);
-    return Number.isFinite(startedAt) ? (Date.now() - startedAt) / 1000 : undefined;
-  },
-}));
+// Conditional so the same harness also drives a base tree that predates the module.
+if (existsSync(`${src}review/job-clock.ts`)) {
+  const realJobClock = await import(`${src}review/job-clock.ts`);
+  mock.module(`${src}review/job-clock.ts`, () => ({
+    ...realJobClock,
+    measuredJobElapsedSeconds: () => {
+      const startedAt = Number(process.env.ELEK_HARNESS_JOB_STARTED_AT_MS);
+      return Number.isFinite(startedAt) ? (Date.now() - startedAt) / 1000 : undefined;
+    },
+  }));
+}
 
 mock.module("@actions/github", () => ({
   context: {},

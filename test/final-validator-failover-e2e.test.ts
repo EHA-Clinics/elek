@@ -41,7 +41,7 @@ interface HarnessRun {
 function runOrchestrator(params: {
   synthesis: Array<Record<string, unknown>>;
   inputs?: Record<string, string>;
-  /** When the job started, in seconds before now (`ELEK_JOB_STARTED_AT`). Default: now. */
+  /** When the job started, in seconds before now. Default: now. */
   jobStartedSecondsAgo?: number;
 }): HarnessRun {
   const dir = mkdtempSync(join(tmpdir(), "elek-harness-"));
@@ -92,9 +92,8 @@ function runOrchestrator(params: {
     GITHUB_RUN_ID: "1",
     // A placeholder: octokit is replaced in the preload and never sends it anywhere.
     GITHUB_TOKEN: "harness-placeholder",
-    // The measured job start. On a GitHub runner the Runner.Worker ancestor is also found,
-    // and the EARLIER of the two wins, which only ever shrinks the failover budget.
-    ELEK_JOB_STARTED_AT: String(Math.floor(Date.now() / 1000) - (params.jobStartedSecondsAgo ?? 0)),
+    // When the job started, as the harness's job clock reports it.
+    ELEK_HARNESS_JOB_STARTED_AT_MS: String(Date.now() - (params.jobStartedSecondsAgo ?? 0) * 1000),
     ELEK_HARNESS_SCRIPT: JSON.stringify({ synthesis: params.synthesis }),
     ELEK_HARNESS_CALLS: callsPath,
   };

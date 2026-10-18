@@ -309,12 +309,11 @@ inputs:
       timeout, max_turns and every other class never fail over. A model with the
       same identity as the validator (last two path segments) is refused before
       any model runs. The failover gets min(validator budget, what the live job
-      clock leaves after a 60s margin). The job clock is MEASURED from the job's
-      start: the runner's per-job Runner.Worker process (Linux), or
-      ELEK_JOB_STARTED_AT (epoch seconds, e.g. written to GITHUB_ENV by a first
-      step) on other runners; the earlier wins. It does not run when
-      job_timeout_minutes is unset, the job's start cannot be measured, or the
-      budget is under min(300s, validator budget). It does not enter the serial
+      clock leaves after a 60s margin). The job clock is MEASURED from the start
+      of the runner's per-job Runner.Worker process (Linux, no container:). It
+      does not run when job_timeout_minutes is unset, the job's start cannot be
+      measured (container jobs, macOS, Windows), or the budget is under
+      min(300s, validator budget). It does not enter the serial
       budget guard. When it can run, the max_cost_usd pre-run estimate prices
       it at this model's rates. (EHAC-3622)
     required: false

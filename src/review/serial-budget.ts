@@ -240,9 +240,9 @@ export interface SynthesisRetryBudgetInput {
   /** Wall clock already spent inside the action, from its start, read when attempt 1 ended. */
   elapsedSeconds: number;
   /**
-   * Wall clock since the JOB started, measured (`measuredJobElapsedSeconds`: the runner's
-   * per-job worker process, or `ELEK_JOB_STARTED_AT`). Undefined when the job's start cannot
-   * be measured, and then no failover runs: nothing can be proven to fit.
+   * Wall clock since the JOB started, measured from the runner's per-job worker process
+   * (`measuredJobElapsedSeconds`). Undefined when the job's start cannot be measured, and
+   * then no failover runs: nothing can be proven to fit.
    */
   jobElapsedSeconds: number | undefined;
   setupSeconds?: number;

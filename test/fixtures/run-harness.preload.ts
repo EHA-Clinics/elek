@@ -12,6 +12,7 @@
  *   ELEK_HARNESS_SCRIPT  JSON `{ "synthesis": [<PiRunResult overrides>, ...] }`. The
  *                        nth non-lens run gets entry n; lens runs always succeed.
  *   ELEK_HARNESS_CALLS   file that receives one JSON line per model run.
+ *   ELEK_HARNESS_JOB_STARTED_AT_MS  when the job started (epoch ms); unset = unmeasurable.
  */
 import { mock } from "bun:test";
 import { appendFileSync } from "fs";
@@ -86,6 +87,17 @@ mock.module(`${src}github/comments.ts`, () => ({
   postComment: async () => ({ id: 2 }),
   createPRReview: async () => {},
   fetchReviewComments: async () => [],
+}));
+
+// The job clock. On a real runner it is the Runner.Worker ancestor's age (test/job-clock.test.ts
+// proves that in CI); here the test sets when the job started, so a run near the cap is reachable.
+const realJobClock = await import(`${src}review/job-clock.ts`);
+mock.module(`${src}review/job-clock.ts`, () => ({
+  ...realJobClock,
+  measuredJobElapsedSeconds: () => {
+    const startedAt = Number(process.env.ELEK_HARNESS_JOB_STARTED_AT_MS);
+    return Number.isFinite(startedAt) ? (Date.now() - startedAt) / 1000 : undefined;
+  },
 }));
 
 mock.module("@actions/github", () => ({

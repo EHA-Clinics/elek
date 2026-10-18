@@ -6,7 +6,6 @@ import { describe, expect, it } from "bun:test";
 import { execFileSync } from "child_process";
 import { readFileSync } from "fs";
 import {
-  configuredJobStartedAtMs,
   measuredJobElapsedSeconds,
   parseProcStat,
   runnerWorkerStartedAtMs,
@@ -32,7 +31,6 @@ function procDeps(processes: Record<number, string>, overrides: Partial<JobClock
     },
     pid: 400,
     clockTicksPerSecond: () => 100,
-    env: {},
     now: () => NOW,
     ...overrides,
   };
@@ -71,37 +69,15 @@ describe("runnerWorkerStartedAtMs", () => {
   });
 });
 
-describe("configuredJobStartedAtMs (ELEK_JOB_STARTED_AT)", () => {
-  it("accepts a past epoch-seconds value and refuses anything else", () => {
-    const at = (value: string | undefined) => configuredJobStartedAtMs({ env: { ELEK_JOB_STARTED_AT: value }, now: () => NOW });
-    expect(at(String(BOOT + 9500))).toBe((BOOT + 9500) * 1000);
-    expect(at(undefined)).toBeUndefined();
-    expect(at("")).toBeUndefined();
-    expect(at("1e9")).toBeUndefined();
-    expect(at("-5")).toBeUndefined();
-    expect(at(String(BOOT + 20_000))).toBeUndefined(); // in the future
-  });
-});
-
 describe("measuredJobElapsedSeconds", () => {
   it("uses the worker's start", () => {
     expect(measuredJobElapsedSeconds(procDeps(RUNNER_TREE))).toBe(1000);
   });
 
-  it("takes the EARLIEST start when both are known: an earlier start only shrinks the budget", () => {
-    const later = procDeps(RUNNER_TREE, { env: { ELEK_JOB_STARTED_AT: String(BOOT + 9500) } });
-    expect(measuredJobElapsedSeconds(later)).toBe(1000);
-    const earlier = procDeps(RUNNER_TREE, { env: { ELEK_JOB_STARTED_AT: String(BOOT + 8000) } });
-    expect(measuredJobElapsedSeconds(earlier)).toBe(2000);
-  });
-
-  it("falls back to ELEK_JOB_STARTED_AT without /proc", () => {
-    const deps = procDeps({}, { env: { ELEK_JOB_STARTED_AT: String(BOOT + 9700) } });
-    expect(measuredJobElapsedSeconds(deps)).toBe(300);
-  });
-
   it("is undefined when the job's start cannot be measured at all", () => {
     expect(measuredJobElapsedSeconds(procDeps({}))).toBeUndefined();
+    // A worker start in the future (clock skew) is not a measurement.
+    expect(measuredJobElapsedSeconds(procDeps(RUNNER_TREE, { now: () => (BOOT + 8000) * 1000 }))).toBeUndefined();
   });
 
   // Live evidence, on a real GitHub-hosted Linux runner only (elek's own CI): this test
@@ -114,7 +90,6 @@ describe("measuredJobElapsedSeconds", () => {
         readFile: (path) => readFileSync(path, "utf-8"),
         pid: process.pid,
         clockTicksPerSecond: () => Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf-8" }).trim()),
-        env: {},
         now: () => Date.now(),
       });
       expect(elapsed).toBeDefined();

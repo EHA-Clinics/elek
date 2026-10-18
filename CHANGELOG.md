@@ -21,11 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (last two path segments, as `selectFailoverModel` compares) is refused before any
   model runs, as a `configuration_error`. The failover's wall clock comes from the LIVE
   job clock: `min(V, job_timeout_minutes x 60 - spent - 60)`, where `spent` is measured
-  from the job's start: the runner's per-job `Runner.Worker` process (Linux `/proc`) or
-  `ELEK_JOB_STARTED_AT` (epoch seconds, for other runners), the earlier winning, so slow
+  from the start of the runner's per-job `Runner.Worker` process (Linux `/proc`), so slow
   steps before the action shrink the budget. It does not run when `job_timeout_minutes`
-  is unset, the job's start cannot be measured, or that is under `min(300s, V)` (300s
-  covers 94 of 102 successful deepseek-v4-pro-0813 syntheses). The static serial-budget guard is
+  is unset, the job's start cannot be measured (container jobs, macOS, Windows), or that
+  is under `min(300s, V)` (300s covers 94 of 102 successful deepseek-v4-pro-0813
+  syntheses). The static serial-budget guard is
   unchanged. Both attempts are recorded in `attempts` (`attempt: 2`, `failover: true`,
   `runTimeoutSeconds`), the decisive `modelRuns` validator entry carries
   `assignedModelLabel`, `actualModelLabel`, `failoverUsed` and `attemptCount`,

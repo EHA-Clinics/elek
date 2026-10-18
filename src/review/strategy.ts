@@ -8,6 +8,7 @@ import { diffPromptBudgetChars, formatChangedFilesForPrompt } from "./diff-conte
 import {
   resolveSynthesisRetrySeconds,
   resolveTimeoutRetrySeconds,
+  synthesisRetrySpentSeconds,
   SYNTHESIS_RETRY_MIN_SECONDS,
   TIMEOUT_RETRY_MIN_SECONDS,
   type SynthesisRetryBudgetInput,
@@ -421,9 +422,9 @@ export function resolveSynthesisRetry(params: {
     return no(
       budget?.jobTimeoutMinutes === undefined
         ? "the final validator fails over only within a provable job budget, and job_timeout_minutes is unset"
-        : `the live job clock cannot cover a failover synthesis: ${Math.round(budget.elapsedSeconds)}s of the ` +
+        : `the live job clock cannot cover a failover synthesis: ${Math.round(synthesisRetrySpentSeconds(budget))}s of the ` +
             `${budget.jobTimeoutMinutes * 60}s job are spent, leaving less than the ` +
-            `${Math.min(SYNTHESIS_RETRY_MIN_SECONDS, Math.floor(budget.validatorSeconds))}s minimum after setup and margin`,
+            `${Math.min(SYNTHESIS_RETRY_MIN_SECONDS, Math.floor(budget.validatorSeconds))}s minimum after the margin`,
     );
   }
   return {
@@ -641,16 +642,19 @@ export function costEstimateLensJobs(
 
 /**
  * The synthesis models the pre-run `max_cost_usd` estimate prices (EHAC-3622): the
- * validator, plus the pinned final-validator failover when it is a distinct model, so a
- * cap is never exceeded by an attempt the estimate never saw. With no failover pinned the
- * list is exactly the validator, as before.
+ * validator, plus the pinned final-validator failover when it can actually run (a distinct
+ * model and a known job cap, without which `resolveSynthesisRetry` never retries), so a cap
+ * is never exceeded by an attempt the estimate never saw, nor spent on one that cannot
+ * happen. With no failover pinned the list is exactly the validator, as before.
  */
 export function costEstimateSynthesisModels(
   validator: ModelSpec,
   validatorFailoverModel: ModelSpec | undefined,
+  jobTimeoutMinutes: number | undefined,
 ): ModelSpec[] {
   if (
     !validatorFailoverModel ||
+    jobTimeoutMinutes === undefined ||
     normalizeModelIdentity(validatorFailoverModel) === normalizeModelIdentity(validator)
   ) {
     return [validator];

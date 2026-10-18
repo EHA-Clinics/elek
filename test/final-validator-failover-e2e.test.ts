@@ -12,7 +12,7 @@
  * summary it writes. The pure contract is in final-validator-failover.test.ts.
  */
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -29,7 +29,7 @@ interface HarnessRun {
     modelRuns: Array<Record<string, unknown>>;
     retriedLensIds: string[];
   };
-  calls: Array<{ promptName: string; model: string; runTimeoutSeconds: number }>;
+  calls: Array<{ promptName: string; model: string; runTimeoutSeconds: number; promptNamesModel: boolean }>;
   stdout: string;
 }
 
@@ -41,6 +41,8 @@ interface HarnessRun {
 function runOrchestrator(params: {
   synthesis: Array<Record<string, unknown>>;
   inputs?: Record<string, string>;
+  /** Backdate the event payload, which the runner writes at job setup, by this many seconds. */
+  eventAgeSeconds?: number;
 }): HarnessRun {
   const dir = mkdtempSync(join(tmpdir(), "elek-harness-"));
   const eventPath = join(dir, "event.json");
@@ -59,6 +61,10 @@ function runOrchestrator(params: {
       },
     }),
   );
+  if (params.eventAgeSeconds !== undefined) {
+    const then = new Date(Date.now() - params.eventAgeSeconds * 1000);
+    utimesSync(eventPath, then, then);
+  }
   const callsPath = join(dir, "calls.jsonl");
   const inputs: Record<string, string> = {
     PROVIDER: "openrouter",
@@ -95,21 +101,25 @@ function runOrchestrator(params: {
   };
   for (const [name, value] of Object.entries(inputs)) env[`INPUT_${name}`] = value;
 
-  const child = Bun.spawnSync(
-    [process.execPath, "--preload", join(ROOT, "test", "fixtures", "run-harness.preload.ts"), join(ROOT, "src", "entrypoints", "run.ts")],
-    { cwd: ROOT, env, stdout: "pipe", stderr: "pipe" },
-  );
-  const stdout = `${child.stdout.toString()}\n${child.stderr.toString()}`;
-  const summaryPath = join(dir, "elek-review-summary.json");
-  if (!existsSync(summaryPath)) throw new Error(`no review summary was written:\n${stdout}`);
-  return {
-    exitCode: child.exitCode ?? -1,
-    summary: JSON.parse(readFileSync(summaryPath, "utf-8")),
-    calls: existsSync(callsPath)
-      ? readFileSync(callsPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line))
-      : [],
-    stdout,
-  };
+  try {
+    const child = Bun.spawnSync(
+      [process.execPath, "--preload", join(ROOT, "test", "fixtures", "run-harness.preload.ts"), join(ROOT, "src", "entrypoints", "run.ts")],
+      { cwd: ROOT, env, stdout: "pipe", stderr: "pipe" },
+    );
+    const stdout = `${child.stdout.toString()}\n${child.stderr.toString()}`;
+    const summaryPath = join(dir, "elek-review-summary.json");
+    if (!existsSync(summaryPath)) throw new Error(`no review summary was written:\n${stdout}`);
+    return {
+      exitCode: child.exitCode ?? -1,
+      summary: JSON.parse(readFileSync(summaryPath, "utf-8")),
+      calls: existsSync(callsPath)
+        ? readFileSync(callsPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line))
+        : [],
+      stdout,
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 const stall = {
@@ -171,6 +181,8 @@ describe("orchestrator end to end: the final validator fails over once (EHAC-362
       ["prompt", FLASH],
       ["prompt-failover", PRO],
     ]);
+    // The failover's synthesis prompt is rebuilt for the failover model, not reused.
+    expect(synthesisCalls.map((c) => c.promptNamesModel)).toEqual([true, true]);
     // Early in a 65-minute job the live clock affords the full validator budget, V = 1200s.
     expect(synthesisCalls.map((c) => c.runTimeoutSeconds)).toEqual([1200, 1200]);
     expect(run.summary.attempts.filter((a) => a.role === "validator").map((a) => a.runTimeoutSeconds)).toEqual([
@@ -205,6 +217,20 @@ describe("orchestrator end to end: the final validator fails over once (EHAC-362
       [2, true, PRO, "invalid_output"],
     ]);
     expect(run.calls.filter((c) => !c.promptName.startsWith("lens-"))).toHaveLength(2);
+  });
+
+  it("the MEASURED job clock near the cap: NO failover, and the log says why", () => {
+    // The runner wrote the event payload 3600s ago; 3900 - 3600 - 60 = 240 < 300.
+    const run = runOrchestrator({
+      synthesis: [stall, {}],
+      inputs: { VALIDATOR_FAILOVER_MODEL: PRO },
+      eventAgeSeconds: 3600,
+    });
+
+    expect(run.summary.review.terminalReason).toBe("validator_failed");
+    expect(validatorAttempts(run)).toHaveLength(1);
+    expect(run.calls.filter((c) => !c.promptName.startsWith("lens-"))).toHaveLength(1);
+    expect(run.stdout).toContain("NOT retried: the live job clock cannot cover a failover synthesis");
   });
 
   it("a synthesis that ends timeout is NOT retried, even with a pinned model", () => {

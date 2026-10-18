@@ -15,7 +15,7 @@
  */
 import * as core from "@actions/core";
 import * as github from "@actions/github";
-import { writeFileSync, mkdirSync, existsSync, readFileSync, unlinkSync } from "fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, statSync, unlinkSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { execSync } from "child_process";
@@ -580,7 +580,7 @@ async function run(): Promise<void> {
     const lensCosts = costEstimateLensJobs(plan, validatorReviewFailoverModel, (job) => priceLensJob(job).costUsd).map(priceLensJob);
     // The synthesis, plus the pinned final-validator failover when one is set (EHAC-3622),
     // each at its own model's rates on its own prompt.
-    const synthesisCosts = costEstimateSynthesisModels(plan.validator, validatorFailoverModel).map((model) =>
+    const synthesisCosts = costEstimateSynthesisModels(plan.validator, validatorFailoverModel, parsedInputs.jobTimeoutMinutes).map((model) =>
       estimatePromptOnlyCost({
         modelLabel: model.label,
         prompt: buildSynthesisPrompt({
@@ -1019,6 +1019,7 @@ async function run(): Promise<void> {
         validatorSeconds: roleTimeouts.validator,
         jobTimeoutMinutes: parsedInputs.jobTimeoutMinutes,
         elapsedSeconds: (Date.now() - actionStartedAt.getTime()) / 1000,
+        jobElapsedSeconds: jobElapsedSecondsFromEventFile(process.env.GITHUB_EVENT_PATH),
       }),
       // The failed attempt's buffered inline comments were never validated by a
       // successful synthesis; only the decisive attempt's findings are posted.
@@ -1319,6 +1320,22 @@ run().catch((err) => {
   core.setFailed(`Fatal: ${err.message}`);
   process.exit(1);
 });
+
+/**
+ * Seconds since the runner wrote the event payload, which it does while setting the job
+ * up: a measurement of the job clock that does not assume the steps before the action
+ * took 37s. Undefined when unreadable or in the future; the budget then counts
+ * `setup + elapsed` alone. An older file only shrinks the failover budget, never grows it.
+ */
+function jobElapsedSecondsFromEventFile(eventPath: string | undefined): number | undefined {
+  if (!eventPath) return undefined;
+  try {
+    const seconds = (Date.now() - statSync(eventPath).mtimeMs) / 1000;
+    return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function parseExistingTrackingCommentId(value: string | undefined): number | undefined {
   if (!value) return undefined;

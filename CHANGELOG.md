@@ -20,15 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nor does `max_turns` or any other class. A pinned model with the validator's identity
   (last two path segments, as `selectFailoverModel` compares) is refused before any
   model runs, as a `configuration_error`. The failover's wall clock comes from the LIVE
-  job clock: `min(V, job_timeout_minutes x 60 - 37 - elapsed - 60)`, and it does not run
-  when `job_timeout_minutes` is unset or that is under `min(300s, V)` (300s covers 94 of
-  102 successful deepseek-v4-pro-0813 syntheses). The static serial-budget guard is
+  job clock: `min(V, job_timeout_minutes x 60 - spent - 60)`, where `spent` is the larger
+  of `37 + the action's elapsed time` and the time since the runner wrote the event
+  payload (so slow steps before the action shrink it), and it does not run when
+  `job_timeout_minutes` is unset or that is under `min(300s, V)` (300s covers 94 of 102
+  successful deepseek-v4-pro-0813 syntheses). The static serial-budget guard is
   unchanged. Both attempts are recorded in `attempts` (`attempt: 2`, `failover: true`,
   `runTimeoutSeconds`), the decisive `modelRuns` validator entry carries
   `assignedModelLabel`, `actualModelLabel`, `failoverUsed` and `attemptCount`,
   `retriedLensIds` gains `validator`, and the failed attempt's buffered inline comments
-  are dropped before the failover runs. The pre-run `max_cost_usd` estimate prices the
-  failover synthesis at the pinned model's rates.
+  are dropped before the failover runs. When the failover can run (a job cap is set), the
+  pre-run `max_cost_usd` estimate prices it at the pinned model's rates.
 - `validator_review_failover_model` (EHAC-2522): an optional, single, caller-pinned
   model the `validator-review` audit lens fails over to ONCE when its first attempt
   ends `invalid_output`. eha_care #4710 (run 38797605889) breached its council when

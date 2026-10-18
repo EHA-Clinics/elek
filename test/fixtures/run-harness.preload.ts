@@ -27,7 +27,7 @@ const realPi = await import(`${src}pi.ts`);
 mock.module(`${src}pi.ts`, () => ({
   ...realPi,
   runPi: async (
-    _prompt: string,
+    prompt: string,
     inputs: { provider: string; model: string; runTimeoutSeconds: number },
     _onProgress: unknown,
     _useMcp: boolean,
@@ -39,7 +39,12 @@ mock.module(`${src}pi.ts`, () => ({
     if (callsPath) {
       appendFileSync(
         callsPath,
-        `${JSON.stringify({ promptName, model: inputs.model, runTimeoutSeconds: inputs.runTimeoutSeconds })}\n`,
+        `${JSON.stringify({
+          promptName,
+          model: inputs.model,
+          runTimeoutSeconds: inputs.runTimeoutSeconds,
+          promptNamesModel: prompt.includes(inputs.model),
+        })}\n`,
       );
     }
     return {

@@ -169,8 +169,8 @@ describe("executeSynthesisWithFailover (EHAC-3622)", () => {
     expect(out.result.conclusion).toBe("failure");
     expect(logs).toEqual([
       "warn:[validator] synthesis attempt 1 failed (class=stall) and is NOT retried: the live job clock cannot " +
-        "cover a failover synthesis: 3540s of the 3900s job are spent, leaving less than the 300s minimum " +
-        "after setup and margin",
+        "cover a failover synthesis: 3577s of the 3900s job are spent, leaving less than the 300s minimum " +
+        "after the margin",
     ]);
   });
 
@@ -308,6 +308,16 @@ describe("resolveSynthesisRetrySeconds: the live-clock gate (EHAC-3622)", () => 
     expect(resolveSynthesisRetrySeconds(clock(3000))).toBe(803);
   });
 
+  it("counts the MEASURED job clock when the steps before the action ran longer than 37s", () => {
+    // 180s before the action, 3400s inside it: 3580s spent, 3900 - 3580 - 60 = 260 < 300.
+    expect(resolveSynthesisRetrySeconds(clock(3400, { jobElapsedSeconds: 3580 }))).toBeUndefined();
+    // 200s before the action, 3000s inside: 3900 - 3200 - 60 = 640.
+    expect(resolveSynthesisRetrySeconds(clock(3000, { jobElapsedSeconds: 3200 }))).toBe(640);
+    // A measured clock SHORTER than setup + elapsed never grows the budget.
+    expect(resolveSynthesisRetrySeconds(clock(3000, { jobElapsedSeconds: 100 }))).toBe(803);
+    expect(resolveSynthesisRetrySeconds(clock(3000, { jobElapsedSeconds: Number.NaN }))).toBe(803);
+  });
+
   it(`refuses below the ${SYNTHESIS_RETRY_MIN_SECONDS}s floor, at the boundary exactly`, () => {
     // 3900 - 37 - 3503 - 60 = 300: allowed. One second later: 299, refused.
     expect(resolveSynthesisRetrySeconds(clock(3503))).toBe(300);
@@ -371,16 +381,18 @@ describe("budgets outside the live clock (EHAC-3622)", () => {
   });
 
   it("the max_cost_usd estimate prices the pinned failover synthesis only when it can run", () => {
-    expect(costEstimateSynthesisModels(FLASH, undefined)).toEqual([FLASH]);
-    expect(costEstimateSynthesisModels(FLASH, PRO)).toEqual([FLASH, PRO]);
+    expect(costEstimateSynthesisModels(FLASH, undefined, 65)).toEqual([FLASH]);
+    expect(costEstimateSynthesisModels(FLASH, PRO, 65)).toEqual([FLASH, PRO]);
+    // No job cap: the failover can never run, so it is not reserved for.
+    expect(costEstimateSynthesisModels(FLASH, PRO, undefined)).toEqual([FLASH]);
     const sameOtherRoute: ModelSpec = { provider: "deepseek", model: "deepseek/deepseek-v4.1-flash", label: "deepseek/deepseek-v4.1-flash" };
-    expect(costEstimateSynthesisModels(FLASH, sameOtherRoute)).toEqual([FLASH]);
+    expect(costEstimateSynthesisModels(FLASH, sameOtherRoute, 65)).toEqual([FLASH]);
   });
 
   it("run.ts prices the pre-run estimate through costEstimateSynthesisModels with the pinned model", () => {
     const run = readFileSync(join(import.meta.dir, "..", "src", "entrypoints", "run.ts"), "utf-8");
     expect(run).toMatch(
-      /const estimatePlannedInputCost = [\s\S]*?costEstimateSynthesisModels\(plan\.validator, validatorFailoverModel\)\.map\(/,
+      /const estimatePlannedInputCost = [\s\S]*?costEstimateSynthesisModels\(plan\.validator, validatorFailoverModel, parsedInputs\.jobTimeoutMinutes\)\.map\(/,
     );
   });
 });

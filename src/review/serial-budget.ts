@@ -239,15 +239,37 @@ export interface SynthesisRetryBudgetInput {
   jobTimeoutMinutes: number | undefined;
   /** Wall clock already spent inside the action, from its start, read when attempt 1 ended. */
   elapsedSeconds: number;
+  /**
+   * Wall clock since the JOB started, when the runner lets it be measured (run.ts reads the
+   * mtime of the event payload the runner writes while setting the job up). Absent or
+   * unreadable: only `setup + elapsed` is counted.
+   */
+  jobElapsedSeconds?: number;
   setupSeconds?: number;
   marginSeconds?: number;
   minSeconds?: number;
 }
 
+/** The job wall clock already spent: the larger of `setup + elapsed` and the measured job clock. */
+export function synthesisRetrySpentSeconds({
+  elapsedSeconds,
+  jobElapsedSeconds,
+  setupSeconds = SETUP_SECONDS,
+}: Pick<SynthesisRetryBudgetInput, "elapsedSeconds" | "jobElapsedSeconds" | "setupSeconds">): number {
+  const measured = jobElapsedSeconds !== undefined && Number.isFinite(jobElapsedSeconds) ? jobElapsedSeconds : 0;
+  return Math.max(setupSeconds + elapsedSeconds, measured);
+}
+
 /**
  * The per-attempt wall clock for the ONE final-validator failover (EHAC-3622).
  *
- *   S2 = min(V, jobTimeoutMinutes x 60 - setup - elapsed - margin)
+ *   spent = max(setup + elapsed, jobElapsed)
+ *   S2    = min(V, jobTimeoutMinutes x 60 - spent - margin)
+ *
+ * `setup` (37s) is a constant for the job steps before the action; when the job's own
+ * start can be measured, the larger of the two is used, so steps that ran longer than 37s
+ * (a slow checkout, a cold `npm ci`) shrink the failover instead of pushing the job past
+ * its cap. Measured on eha_care run 39038897722: 40s from job start to the action.
  *
  * The synthesis is the last model run, so nothing after it needs reserving beyond the
  * margin (posting the review, draining inline comments, the caller's coverage steps:
@@ -265,6 +287,7 @@ export function resolveSynthesisRetrySeconds({
   validatorSeconds,
   jobTimeoutMinutes,
   elapsedSeconds,
+  jobElapsedSeconds,
   setupSeconds = SETUP_SECONDS,
   marginSeconds = TIMEOUT_RETRY_MARGIN_SECONDS,
   minSeconds = SYNTHESIS_RETRY_MIN_SECONDS,
@@ -272,7 +295,8 @@ export function resolveSynthesisRetrySeconds({
   if (jobTimeoutMinutes === undefined) return undefined;
   if (![validatorSeconds, jobTimeoutMinutes, elapsedSeconds].every(Number.isFinite)) return undefined;
   const v = Math.floor(validatorSeconds);
-  const remaining = Math.floor(jobTimeoutMinutes * 60 - setupSeconds - elapsedSeconds - marginSeconds);
+  const spent = synthesisRetrySpentSeconds({ elapsedSeconds, jobElapsedSeconds, setupSeconds });
+  const remaining = Math.floor(jobTimeoutMinutes * 60 - spent - marginSeconds);
   const s2 = Math.min(v, remaining);
   return s2 >= Math.min(minSeconds, v) && s2 > 0 ? s2 : undefined;
 }

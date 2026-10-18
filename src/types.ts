@@ -105,6 +105,12 @@ export interface ActionInputs {
    * default — keeps that class a blocking no-retry, exactly as before.
    */
   validatorReviewFailoverModel?: string;
+  /**
+   * Optional single model the FINAL validator (the synthesis) fails over to, ONCE, when
+   * its first attempt ends `stall` or `invalid_output`, within the live job clock
+   * (EHAC-3622). Undefined, the shipped default, keeps the synthesis a single attempt.
+   */
+  validatorFailoverModel?: string;
   /** Optional prompt-level severity threshold for reported findings. */
   severityThreshold: "" | "critical" | "important" | "minor";
   /** Show estimated review cost in logs, outputs, and comments. */

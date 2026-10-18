@@ -25,6 +25,11 @@
  * arrive late (470.6s on eha_care #4710). Pinning it therefore switches the guard
  * to the retry-aware formula even when the validator budget is unset.
  *
+ * EHAC-3622's final-validator failover (`validator_failover_model`) does NOT enter this
+ * guard. It runs only on what the live clock provably leaves (`resolveSynthesisRetrySeconds`),
+ * so it cannot push the job past its cap, and counting a fourth full budget here would
+ * refuse the org's own config (37 + max(2 x 900, 2 x 1200) + 1200 + 1200 = 4837s > 65 x 60).
+ *
  * and if that exceeds the job's own `timeout-minutes`, the runner cancels the job
  * mid-flight. A cancelled job loses the coverage record ENTIRELY — the required
  * check goes red with `verdict: UNKNOWN`, no findings, and nothing to action. That
@@ -213,6 +218,88 @@ export function resolveTimeoutRetrySeconds({
   const remaining = Math.floor(jobTimeoutMinutes * 60 - setupSeconds - elapsedSeconds - v - marginSeconds);
   const t2 = Math.min(half, remaining);
   return t2 >= minSeconds ? t2 : undefined;
+}
+
+/**
+ * The smallest wall clock worth giving the ONE final-validator failover (EHAC-3622).
+ *
+ * 300s covers 92% (94 of 102) of the successful deepseek-v4-pro-0813 final syntheses in
+ * eha_care councils on 2026-10-15 (median 108.6s, p90 264.9s, max 1023.5s) and every
+ * one of the 15 successful deepseek-v4.1-flash syntheses on 2026-10-17 (max 196.9s).
+ * The lens floor of 120s would cover only 53% of the former: a retry that short mostly
+ * spends money to time out. A configured validator budget below 300s lowers the floor to
+ * that budget, because the retry never needs more than the first attempt had.
+ */
+export const SYNTHESIS_RETRY_MIN_SECONDS = 300;
+
+export interface SynthesisRetryBudgetInput {
+  /** V: the resolved validator budget the first synthesis attempt ran on. */
+  validatorSeconds: number;
+  /** The job's own cap; undefined when the caller does not pass `job_timeout_minutes`. */
+  jobTimeoutMinutes: number | undefined;
+  /** Wall clock already spent inside the action, from its start, read when attempt 1 ended. */
+  elapsedSeconds: number;
+  /**
+   * Wall clock since the JOB started, measured from the runner's per-job worker process
+   * (`measuredJobElapsedSeconds`). Undefined when the job's start cannot be measured, and
+   * then no failover runs: nothing can be proven to fit.
+   */
+  jobElapsedSeconds: number | undefined;
+  setupSeconds?: number;
+  marginSeconds?: number;
+  minSeconds?: number;
+}
+
+/** The job wall clock already spent: the larger of `setup + elapsed` and the measured job clock. */
+export function synthesisRetrySpentSeconds({
+  elapsedSeconds,
+  jobElapsedSeconds,
+  setupSeconds = SETUP_SECONDS,
+}: Pick<SynthesisRetryBudgetInput, "elapsedSeconds" | "jobElapsedSeconds" | "setupSeconds">): number {
+  const measured = jobElapsedSeconds !== undefined && Number.isFinite(jobElapsedSeconds) ? jobElapsedSeconds : 0;
+  // Both are lower bounds on the true job clock; the larger is the safer one.
+  return Math.max(setupSeconds + elapsedSeconds, measured);
+}
+
+/**
+ * The per-attempt wall clock for the ONE final-validator failover (EHAC-3622).
+ *
+ *   spent = max(setup + elapsed, jobElapsed)
+ *   S2    = min(V, jobTimeoutMinutes x 60 - spent - margin)
+ *
+ * `jobElapsed` is the MEASURED job clock (`src/review/job-clock.ts`), so steps before the
+ * action that ran longer than the 37s `setup` constant (a slow checkout, a cold `npm ci`;
+ * 40s on eha_care run 39038897722) shrink the failover instead of pushing the job past its
+ * cap. `setup + elapsed` is kept as a floor under it.
+ *
+ * The synthesis is the last model run, so nothing after it needs reserving beyond the
+ * margin (posting the review, draining inline comments, the caller's coverage steps:
+ * 4s on eha_care run 39038897722). Reading the LIVE clock is what makes this safe
+ * without touching the pre-run serial guard: the guard asserts the worst case with no
+ * failover, and the failover only ever spends what is provably left. No assumption is
+ * made about how long the failed attempt took — a stall can arrive after 120s or after
+ * most of V.
+ *
+ * Returns undefined, meaning NO retry, when the job cap or the job's start is unknown
+ * (nothing can be proven to fit) or S2 is below `min(minSeconds, V)`. Pure; the caller
+ * supplies both clocks.
+ */
+export function resolveSynthesisRetrySeconds({
+  validatorSeconds,
+  jobTimeoutMinutes,
+  elapsedSeconds,
+  jobElapsedSeconds,
+  setupSeconds = SETUP_SECONDS,
+  marginSeconds = TIMEOUT_RETRY_MARGIN_SECONDS,
+  minSeconds = SYNTHESIS_RETRY_MIN_SECONDS,
+}: SynthesisRetryBudgetInput): number | undefined {
+  if (jobTimeoutMinutes === undefined || jobElapsedSeconds === undefined) return undefined;
+  if (![validatorSeconds, jobTimeoutMinutes, elapsedSeconds, jobElapsedSeconds].every(Number.isFinite)) return undefined;
+  const v = Math.floor(validatorSeconds);
+  const spent = synthesisRetrySpentSeconds({ elapsedSeconds, jobElapsedSeconds, setupSeconds });
+  const remaining = Math.floor(jobTimeoutMinutes * 60 - spent - marginSeconds);
+  const s2 = Math.min(v, remaining);
+  return s2 >= Math.min(minSeconds, v) && s2 > 0 ? s2 : undefined;
 }
 
 /**

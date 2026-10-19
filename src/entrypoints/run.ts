@@ -91,7 +91,7 @@ import {
   type CouncilPolicyResult,
 } from "../review/council-policy.js";
 import { createSummaryFinalizer, type SummaryFinalizer } from "../review/summary-finalizer.js";
-import { parseReviewFindings } from "../review/findings.js";
+import { findingsCountOf, parseReviewFindings } from "../review/findings.js";
 import { preparePublicReviewOutput } from "../review/public-output.js";
 import { configuredPublicModelLabel, modelLabelRedactionTerms, publicModelLabelFor } from "../review/public-label.js";
 import { inlineReviewBufferFromFindings } from "../review/inline-fallback.js";
@@ -808,7 +808,7 @@ async function run(): Promise<void> {
 
     retriedLensIdsForSummary = lensRuns.filter(({ retried }) => retried).map(({ job }) => job.lens.id);
 
-    for (const { job, activeJob, lensResult, attempts, failoverUsed } of lensRuns) {
+    for (const { job, activeJob, lensResult, lensOutput, attempts, failoverUsed } of lensRuns) {
       // Charge for EVERY attempt — a retry spends real money, and a cost report
       // that hides it would understate the run. The pre-execution estimate prices
       // ONE extra reviewer attempt (costEstimateLensJobs), so a run with retries on
@@ -827,6 +827,9 @@ async function run(): Promise<void> {
         actualModelLabel: activeJob.model.label,
         failoverUsed,
         attemptCount: attempts.length,
+        // Recorded here, BEFORE the council policy is evaluated, so a breached council
+        // still says what its finished lenses found (EHAC-3675 groundwork).
+        findingsCount: findingsCountOf(lensResult.conclusion, lensOutput),
       }));
     }
 
@@ -1068,6 +1071,9 @@ async function run(): Promise<void> {
     );
   }
   const parsedFindings = parseReviewFindings(publicOutput);
+  // The synthesized review's count, null unless it is a usable review: a failed or
+  // unusable synthesis posts GENERIC text, and counting that as 0 would read as "no findings".
+  const synthesisFindingsCount = publicConclusion === "success" ? parsedFindings.length : null;
   // ONE decisive validator run, as for a lens: the failover is described on it (assigned vs
   // actual model, attempt count), never split into a second logical run.
   runMetrics.push(metricFromPiRun(result, "validator", {
@@ -1075,6 +1081,7 @@ async function run(): Promise<void> {
     actualModelLabel: activeModelLabel,
     failoverUsed: synthesis.failoverUsed,
     attemptCount: synthesis.attempts.length,
+    findingsCount: synthesisFindingsCount,
   }));
   // Every physical synthesis attempt. Recording them keeps the attempt history a
   // COMPLETE account of what ran, rather than one that silently stops at the reviewer
@@ -1287,6 +1294,7 @@ async function run(): Promise<void> {
     costTotal,
     runs: runMetrics,
     findings: parsedFindings,
+    synthesisFindingsCount,
     promptBudgets: [...promptBudgetByKey.values()],
     retriedLensIds: retriedLensIdsForSummary,
     attempts: attemptMetrics,

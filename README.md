@@ -397,7 +397,7 @@ from a configured extension fails the run; older summaries without these inputs 
 | `model` | _(provider default)_ | `deepseek-v4-pro`, `moonshotai/Kimi-K2.7-Code`, `Qwen/Qwen3.7-Max`, `claude-sonnet-4-6`, `claude-opus-4-8`, `gpt-5.5`, `gemini-3.1-pro-preview` |
 | `thinking` | `medium` | Requested thinking; enabled-mode models use provider defaults. Portable pi levels: `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` |
 | `system_prompt` | _(pi default)_ | Override pi's system prompt |
-| `max_turns` | `20` | Cap conversation turns |
+| `max_turns` | `20` | Cap conversation turns; review runs are told this budget in the system prompt (EHAC-3644) |
 | `run_timeout_seconds` | `600` | Wall-clock timeout for each model run; keep the job timeout higher so elek can update the tracking comment |
 | `stall_timeout_seconds` | `0` | Stream-idle watchdog. Terminates a run that emitted no valid pi stream event for this long and classifies it `stall`, distinct from `timeout`. `0` disables it. Ignored in `ELEK_PI_TEXT_MODE`. A non-integer or negative value refuses to run |
 | `max_degraded_lenses` | `0` | How many reviewer lenses may fail while the review still completes. Validator roles never consume it; a wiped reviewer panel, an unclassifiable failed run, or a value not below the reviewer count still fail. Invalid values resolve to `0` |

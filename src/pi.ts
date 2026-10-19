@@ -48,6 +48,18 @@ const REVIEW_SYSTEM_PROMPT = [
   "Return the requested review format immediately when the review is complete, including when there are no findings.",
 ].join(" ");
 
+/**
+ * The turn budget, stated to the model (EHAC-3644). elek kills pi with `max_turns` once
+ * it starts more than `maxTurns` turns, and nothing in the prompt said so: on 2026-10-19
+ * deepseek-v4-pro-0813 ran into that cap at 60-61 turns six times without ever answering.
+ */
+function turnBudgetPrompt(maxTurns: number): string {
+  return (
+    `You have at most ${maxTurns} turns for this task. Return your final answer in the requested format ` +
+    "before your last turn, even if your investigation is incomplete."
+  );
+}
+
 export interface ProgressEvent {
   type: "thinking" | "tool_start" | "tool_end" | "text" | "done";
   detail?: string;
@@ -962,7 +974,7 @@ export function buildPiArgs(
     args.push("--system-prompt", inputs.systemPrompt);
   }
   if (inputs.mode !== "agent") {
-    args.push("--append-system-prompt", REVIEW_SYSTEM_PROMPT);
+    args.push("--append-system-prompt", `${REVIEW_SYSTEM_PROMPT} ${turnBudgetPrompt(inputs.maxTurns)}`);
   }
 
   if (inputs.tools) {

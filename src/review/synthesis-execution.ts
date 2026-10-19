@@ -2,8 +2,8 @@
  * The FINAL validator (the synthesis), executed with at most ONE failover (EHAC-3622).
  *
  * Extracted from `src/entrypoints/run.ts` for the same reason as `lens-execution.ts`: the
- * contract (one failover and never two, only on stall or invalid_output, only on the
- * pinned model, only within the live job clock, both attempts recorded) is checkable
+ * contract (one failover and never two, only on stall, invalid_output or max_turns
+ * (EHAC-3644), only on the pinned model, only within the live job clock, both attempts recorded) is checkable
  * here without a GitHub event or a real pi.
  *
  * The retry re-runs the synthesis on the SAME lens reports. Lens work is never repeated:

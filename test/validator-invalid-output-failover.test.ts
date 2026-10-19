@@ -10,7 +10,8 @@
  * The properties asserted here, end to end through the council policy:
  *   - invalid_output fails over exactly once, to the pinned model;
  *   - a second invalid_output still breaches;
- *   - timeout / stall / max_turns never fail over on the validator lane;
+ *   - max_turns fails over the same way, with a pinned model only (EHAC-3644);
+ *   - timeout / stall never fail over on the validator lane;
  *   - an empty config is today's policy outcome, byte for byte;
  *   - the serial-budget guard counts the extra attempt.
  */
@@ -152,7 +153,45 @@ describe("validator-review invalid_output failover (EHAC-2522)", () => {
     expect(third.reason).toContain("exhausted");
   });
 
-  it.each(["timeout", "stall", "max_turns"] as const)(
+  it("fails over on max_turns with a pinned model, and the council stays healthy (EHAC-3644)", async () => {
+    // eha_care #4866 run 39234890907: the advisor on deepseek-v4-pro-0813 hit max_turns at
+    // 60-61 turns in a runaway loop and breached a council whose four lenses had succeeded.
+    const { rec, out, policy } = await runAudit([fail(ADVISOR.label, "max_turns"), piResult(PINNED.label)], PINNED);
+
+    expect(rec.seen).toEqual([ADVISOR.label, PINNED.label]);
+    expect(out.retried).toBe(true);
+    expect(out.failoverUsed).toBe(true);
+    expect(out.attemptMetrics.map((m) => [m.assignedModel, m.actualModel, m.failover, m.failureClass])).toEqual([
+      [ADVISOR.label, ADVISOR.label, false, "max_turns"],
+      [ADVISOR.label, PINNED.label, true, undefined],
+    ]);
+    expect(policy.status).toBe("healthy");
+  });
+
+  it("max_turns WITHOUT a pinned model still breaches: one attempt, no roster failover", async () => {
+    const { rec, out, policy } = await runAudit([fail(ADVISOR.label, "max_turns"), piResult(MIMO.label)], undefined);
+
+    expect(rec.seen).toEqual([ADVISOR.label]);
+    expect(out.retried).toBe(false);
+    expect(policy.status).toBe("breached");
+    expect(policy.failedValidatorRoleIds).toEqual(["validator-self-review"]);
+  });
+
+  it("refuses a max_turns failover to a pinned model with the SAME identity as the one that failed", () => {
+    const decision = resolveLensRetry({
+      role: "validator-review",
+      conclusion: "failure",
+      failureClass: "max_turns",
+      attemptsSoFar: 1,
+      assignedModel: ADVISOR,
+      roster: ROSTER,
+      validatorReviewFailoverModel: { provider: "deepseek", model: "deepseek/deepseek-v4-pro-0813", label: "deepseek/deepseek-v4-pro-0813" },
+    });
+    expect(decision.retry).toBe(false);
+    expect(decision.reason).toContain("max_turns requires a distinct model");
+  });
+
+  it.each(["timeout", "stall"] as const)(
     "does NOT fail over on %s, even with a pinned model",
     async (failureClass) => {
       const { rec, out, policy } = await runAudit([fail(ADVISOR.label, failureClass), piResult(PINNED.label)], PINNED);

@@ -392,7 +392,7 @@ async function run(): Promise<void> {
   if (validatorFailoverModel) {
     console.log(
       `[config] validator_failover_model=${validatorFailoverModel.label} ` +
-        "(a final synthesis ending stall or invalid_output fails over once, within the live job clock)",
+        "(a final synthesis ending stall, invalid_output or max_turns fails over once, within the live job clock)",
     );
   }
 
@@ -560,8 +560,8 @@ async function run(): Promise<void> {
     return lensPrompt;
   };
 
-  // The caller-pinned validator-review failover for invalid_output ONLY
-  // (EHAC-2522). Undefined unless the caller set it; never the roster.
+  // The caller-pinned validator-review failover for invalid_output (EHAC-2522)
+  // and max_turns (EHAC-3644) ONLY. Undefined unless the caller set it; never the roster.
   const validatorReviewFailoverModel = resolveValidatorReviewFailoverModel(inputs);
   // Whether a final-validator failover could ever be budgeted on this runner: the same two
   // preconditions resolveSynthesisRetrySeconds enforces at run time (a job cap, and a
@@ -762,9 +762,9 @@ async function run(): Promise<void> {
         //   everything else                    -> no retry, fail closed
         //
         // The validator-review lane is narrower: provider_unavailable -> next
-        // distinct roster model; invalid_output -> the pinned
-        // validator_review_failover_model when one is set (EHAC-2522); nothing else,
-        // timeout included.
+        // distinct roster model; invalid_output (EHAC-2522) and max_turns (EHAC-3644)
+        // -> the pinned validator_review_failover_model when one is set; nothing else,
+        // timeout and stall included.
         //
         // `timeout` retries again since owner ruling 4 (2026-10-16): 35 of 39 measured
         // timeouts were mimo-v2.5-pro first attempts at 900s while the other lenses of
@@ -1015,7 +1015,7 @@ async function run(): Promise<void> {
     return attemptResult;
   };
 
-  // EHAC-3622: a synthesis that ends stall or invalid_output fails over ONCE to the pinned
+  // EHAC-3622: a synthesis that ends stall, invalid_output or (EHAC-3644) max_turns fails over ONCE to the pinned
   // validator_failover_model, on the same lens reports, within what the live job clock
   // still affords. Unset, this is the single attempt it always was.
   const synthesis = await executeSynthesisWithFailover({

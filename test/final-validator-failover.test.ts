@@ -2,8 +2,8 @@
  * EHAC-3622 gap 1: the pure contract of the final-validator failover. The orchestrator
  * wiring is driven end to end in final-validator-failover-e2e.test.ts.
  *
- *   - only `stall` and `invalid_output` fail over; `timeout` (falsified, run 32105023640)
- *     and every other class do not;
+ *   - only `stall`, `invalid_output` and (EHAC-3644) `max_turns` fail over; `timeout`
+ *     (falsified, run 32105023640) and every other class do not;
  *   - once, to the pinned model, never a third attempt;
  *   - only within what the LIVE job clock leaves, never below the floor;
  *   - a pinned model with the validator's identity is refused at preflight;
@@ -150,7 +150,28 @@ describe("executeSynthesisWithFailover (EHAC-3622)", () => {
     ]);
   });
 
-  it.each(["timeout", "max_turns", "provider_transient", "provider_unavailable", "provider_permanent", "process_error", "unknown"] as const)(
+  it("a synthesis ending max_turns IS retried on the pinned failover (EHAC-3644)", async () => {
+    // eha_care #4781 run 39226632625: deepseek-v4-pro-0813 hit max_turns at 60-61 turns in a
+    // runaway loop (max idle ~4s) and the council breached with the lens reports in hand.
+    const { run, out, logs } = await synthesize({ results: [fail(FLASH.label, "max_turns"), piResult(PRO.label)], pinned: PRO });
+
+    expect(run.calls.map((c) => c.model)).toEqual([FLASH.label, PRO.label]);
+    expect(run.calls[1]).toEqual({ model: PRO.label, promptName: "prompt-failover", overrides: { runTimeoutSeconds: 1200 } });
+    expect(out.retried).toBe(true);
+    expect(out.failoverUsed).toBe(true);
+    expect(out.result.conclusion).toBe("success");
+    expect(logs.some((l) => l.startsWith("warn:") && l.includes("class=max_turns") && l.includes(PRO.label))).toBe(true);
+  });
+
+  it("a synthesis ending max_turns WITHOUT a pinned model is still a single attempt", async () => {
+    const { run, out } = await synthesize({ results: [fail(FLASH.label, "max_turns"), piResult(PRO.label)] });
+
+    expect(run.calls.map((c) => c.model)).toEqual([FLASH.label]);
+    expect(out.retried).toBe(false);
+    expect(out.result.conclusion).toBe("failure");
+  });
+
+  it.each(["timeout", "provider_transient", "provider_unavailable", "provider_permanent", "process_error", "unknown"] as const)(
     "a synthesis ending %s is NOT retried, even with a pinned model",
     async (failureClass) => {
       const { run, out, logs } = await synthesize({ results: [fail(FLASH.label, failureClass), piResult(PRO.label)], pinned: PRO });
@@ -161,7 +182,7 @@ describe("executeSynthesisWithFailover (EHAC-3622)", () => {
       expect(out.result.conclusion).toBe("failure");
       expect(logs).toEqual([
         `warn:[validator] synthesis attempt 1 failed (class=${failureClass}) and is NOT retried: ` +
-          `failure class "${failureClass}" does not fail the final validator over; only stall and invalid_output do`,
+          `failure class "${failureClass}" does not fail the final validator over; only stall, invalid_output and max_turns do`,
       ]);
     },
   );
@@ -279,14 +300,15 @@ describe("resolveSynthesisRetry (EHAC-3622)", () => {
     budget: clock(1216),
   };
 
-  it("fails over on exactly stall and invalid_output", () => {
-    expect([...SYNTHESIS_FAILOVER_CLASSES]).toEqual(["stall", "invalid_output"]);
+  it("fails over on exactly stall, invalid_output and max_turns", () => {
+    expect([...SYNTHESIS_FAILOVER_CLASSES]).toEqual(["stall", "invalid_output", "max_turns"]);
     const all: PiFailureClass[] = [
       "stall", "timeout", "max_turns", "invalid_output", "provider_transient",
       "provider_unavailable", "provider_permanent", "process_error", "unknown",
     ];
     expect(all.filter((failureClass) => resolveSynthesisRetry({ ...base, failureClass }).retry)).toEqual([
       "stall",
+      "max_turns",
       "invalid_output",
     ]);
   });

@@ -45,6 +45,12 @@ export interface ReviewRunMetric {
   /** Physical attempts spent on this logical lens (1 or 2). */
   attemptCount?: number;
   /**
+   * Findings in this run's DECISIVE report (`findingsCountOf`), recorded even when the
+   * council later breaches or the synthesis fails (EHAC-3675 groundwork). `null`: the run
+   * failed or its output could not be read as a review. Additive; `version` stays 1.
+   */
+  findingsCount?: number | null;
+  /**
    * The OpenRouter endpoint that actually SERVED this run (EHAC-2280, AC #1), e.g.
    * "DeepInfra". Without it, `modelLabel` alone cannot distinguish "the review timed
    * out" from "the review was routed to a slow endpoint of the same model" — and
@@ -170,6 +176,12 @@ export interface ReviewSummaryInput {
    * stays 1. Absent when no PR diff was read.
    */
   diffProvenance?: ReviewedDiffProvenance;
+  /**
+   * Findings in the synthesized (public) review, emitted as `review.findingsCount`.
+   * `null` whenever there is no usable synthesis: the council breached before it ran, it
+   * failed, or its output was not a usable review. Additive; `version` stays 1.
+   */
+  synthesisFindingsCount?: number | null;
 }
 
 const COMMIT_SHA = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
@@ -204,6 +216,7 @@ export function metricFromPiRun(
     actualModelLabel?: string;
     failoverUsed?: boolean;
     attemptCount?: number;
+    findingsCount?: number | null;
   } = {},
 ): ReviewRunMetric {
   return {
@@ -286,6 +299,7 @@ export function buildReviewSummary(input: ReviewSummaryInput) {
       terminalReason: input.terminalReason ?? "completed",
       skipReason: input.skipReason ?? "",
       failureMessage: input.failureMessage ?? "",
+      findingsCount: input.synthesisFindingsCount ?? null,
     },
     inlineComments,
     findings: (input.findings ?? []).map((finding, index) => ({

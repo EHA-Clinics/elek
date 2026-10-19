@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseReviewFindings } from "../src/review/findings";
+import { findingsCountOf, parseReviewFindings } from "../src/review/findings";
 
 describe("review finding parser", () => {
   it("extracts structured finding fields from review markdown", () => {
@@ -111,5 +111,36 @@ Mentioning unrelated benchmark words here should not enter the finding body.
     expect(findings).toHaveLength(1);
     expect(findings[0].body).not.toContain("Recommendations");
     expect(findings[0].body).not.toContain("benchmark words");
+  });
+});
+
+describe("findingsCountOf (EHAC-3675 groundwork)", () => {
+  const report = [
+    "## Findings",
+    "",
+    "### Off by one",
+    "- Severity: important",
+    "- Confidence: high",
+    "- Evidence: the loop bound",
+    "- Impact: drops the last item",
+    "- Fix: use <=",
+  ].join("\n");
+
+  it("counts the findings the public parser reads", () => {
+    expect(findingsCountOf("success", report)).toBe(1);
+  });
+
+  it("a review with no finding blocks is a real 0", () => {
+    expect(findingsCountOf("success", "No findings.")).toBe(0);
+    expect(findingsCountOf("success", "## Review Summary\n\nNo high-confidence issues.")).toBe(0);
+  });
+
+  it("output that cannot be read as a review is null, never 0", () => {
+    expect(findingsCountOf("success", "")).toBeNull();
+    expect(findingsCountOf("success", "I looked at the change and stopped there.")).toBeNull();
+  });
+
+  it("a failed run is null, even when its partial output holds findings", () => {
+    expect(findingsCountOf("failure", report)).toBeNull();
   });
 });

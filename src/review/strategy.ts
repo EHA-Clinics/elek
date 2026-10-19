@@ -231,6 +231,13 @@ export interface LensRetryDecision {
  * (model, prompt) pair, so a DIFFERENT pinned model is a real remedy. It does not
  * draw from the reviewer roster, and with no pinned model the decision — reason
  * string included — is exactly what it was before.
+ *
+ * EHAC-3644 widens that opt-in to `max_turns`, on the same terms. On 2026-10-19
+ * deepseek-v4-pro-0813 hit max_turns at 60-61 turns as the advisor on eha_care #4866
+ * (run 39234890907) and infra #1206 (run 39243801784): runaway loops with a max idle
+ * of ~4s, so neither stall nor timeout, and each breached its council. That too is a
+ * property of the (model, prompt) pair. With no pinned model `max_turns` stays
+ * blocking, and `timeout` and `stall` still never retry on this lane.
  */
 export function resolveLensRetry(params: {
   role?: ReviewJob["role"];
@@ -239,7 +246,7 @@ export function resolveLensRetry(params: {
   attemptsSoFar: number;
   assignedModel: ModelSpec;
   roster: readonly ModelSpec[];
-  /** The caller-pinned validator-review failover for `invalid_output` (EHAC-2522). */
+  /** The caller-pinned validator-review failover for `invalid_output` (EHAC-2522) and `max_turns` (EHAC-3644). */
   validatorReviewFailoverModel?: ModelSpec;
   /**
    * The job's wall-clock state, evaluated when the attempt failed. Required for a
@@ -253,30 +260,30 @@ export function resolveLensRetry(params: {
   const failureClass: PiFailureClass = params.failureClass ?? "unknown";
 
   const pinned = params.validatorReviewFailoverModel;
-  if (params.role === "validator-review" && failureClass === "invalid_output" && pinned) {
+  if (params.role === "validator-review" && VALIDATOR_REVIEW_PINNED_FAILOVER_CLASSES.includes(failureClass) && pinned) {
     if (params.attemptsSoFar >= MAX_LENS_ATTEMPTS) {
       return no(`the retry budget of ${MAX_LENS_ATTEMPTS} attempt(s) is exhausted`);
     }
-    // Re-sending the prompt that just produced unusable output to the same model
-    // is the byte-identical-retry anti-pattern this module exists to prevent.
+    // Re-sending the prompt that just failed to the same model is the
+    // byte-identical-retry anti-pattern this module exists to prevent.
     if (normalizeModelIdentity(pinned) === normalizeModelIdentity(params.assignedModel)) {
       return no(
         `validator_review_failover_model ${pinned.label} is the model that just failed; ` +
-          "invalid_output requires a distinct model",
+          `${failureClass} requires a distinct model`,
       );
     }
     return {
       retry: true,
       model: pinned,
       failover: true,
-      reason: `failure class "invalid_output" fails the validator-review lane over once to the pinned ${pinned.label}`,
+      reason: `failure class "${failureClass}" fails the validator-review lane over once to the pinned ${pinned.label}`,
     };
   }
   if (params.role === "validator-review" && failureClass !== "provider_unavailable") {
     return no(
       pinned
         ? "validator-review retries only on provider_unavailable and, with a pinned failover model, " +
-            "invalid_output; every other failure class is blocking either way"
+            `${listClasses(VALIDATOR_REVIEW_PINNED_FAILOVER_CLASSES)}; every other failure class is blocking either way`
         : "validator-review retries only on provider_unavailable; every other failure class is blocking either way",
     );
   }
@@ -333,20 +340,45 @@ export function resolveLensRetry(params: {
 }
 
 /**
- * The failure classes on which the FINAL validator (the synthesis) fails over (EHAC-3622).
+ * The failure classes on which the validator-review lane (the advisor) fails over to the
+ * caller-pinned `validator_review_failover_model`: `invalid_output` (EHAC-2522) and
+ * `max_turns` (EHAC-3644). See `resolveLensRetry`.
+ */
+export const VALIDATOR_REVIEW_PINNED_FAILOVER_CLASSES: readonly PiFailureClass[] = Object.freeze([
+  "invalid_output",
+  "max_turns",
+]);
+
+/**
+ * The failure classes on which the FINAL validator (the synthesis) fails over (EHAC-3622,
+ * EHAC-3644).
  *
- * Both are properties of the (model, prompt) pair, measured on the synthesis itself:
+ * All three are properties of the (model, prompt) pair, measured on the synthesis itself:
  * eha_care run 39038897722 stalled after 132.7s on its first turn (max_idle 120.1s,
  * last event message_start) and run 39037993447 ended invalid_output after 108.7s. A
  * different model is a real remedy for both, and each failure threw away ~20 minutes of
- * finished lens work.
+ * finished lens work. `max_turns` joined in EHAC-3644: on 2026-10-19 deepseek-v4-pro-0813
+ * hit max_turns at 60-61 turns as the synthesis on eha_care #4781 (run 39226632625) and
+ * infra #1205 (runs 39233239224 and 39234047319), runaway loops with a max idle of ~4s,
+ * and each breached its council with the lens reports in hand.
  *
  * `timeout` is deliberately absent: the timeout retry was falsified for validator roles by
  * run 32105023640 (four retries on four models, three timed out again, every attempt
- * streaming continuously), and its remedy is `validator_run_timeout_seconds`. `max_turns` and every other
- * class stay blocking too.
+ * streaming continuously), and its remedy is `validator_run_timeout_seconds`. Every other
+ * class stays blocking too.
  */
-export const SYNTHESIS_FAILOVER_CLASSES: readonly PiFailureClass[] = Object.freeze(["stall", "invalid_output"]);
+export const SYNTHESIS_FAILOVER_CLASSES: readonly PiFailureClass[] = Object.freeze([
+  "stall",
+  "invalid_output",
+  "max_turns",
+]);
+
+/** "a", "a and b", "a, b and c". */
+function listClasses(classes: readonly string[]): string {
+  return classes.length <= 2
+    ? classes.join(" and ")
+    : `${classes.slice(0, -1).join(", ")} and ${classes[classes.length - 1]}`;
+}
 
 /**
  * Resolve `validator_failover_model` against the effective validator (EHAC-3622).
@@ -384,7 +416,7 @@ export function resolveValidatorFailoverModel(
 /**
  * Decide whether the failed FINAL synthesis fails over (EHAC-3622).
  *
- * Once, to the pinned model, on `stall` or `invalid_output` only, and only within what the
+ * Once, to the pinned model, on `stall`, `invalid_output` or `max_turns` only, and only within what the
  * live job clock can still afford (`resolveSynthesisRetrySeconds`): no provable budget, no
  * retry. The retry re-runs the SYNTHESIS on the same lens reports; no lens re-runs.
  */
@@ -409,7 +441,7 @@ export function resolveSynthesisRetry(params: {
   if (!SYNTHESIS_FAILOVER_CLASSES.includes(failureClass)) {
     return no(
       `failure class "${failureClass}" does not fail the final validator over; only ` +
-        `${SYNTHESIS_FAILOVER_CLASSES.join(" and ")} do`,
+        `${listClasses(SYNTHESIS_FAILOVER_CLASSES)} do`,
     );
   }
   // Preflight already refuses this; kept so the decision never depends on the caller.

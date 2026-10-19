@@ -91,7 +91,7 @@ import {
   type CouncilPolicyResult,
 } from "../review/council-policy.js";
 import { createSummaryFinalizer, type SummaryFinalizer } from "../review/summary-finalizer.js";
-import { parseReviewFindings } from "../review/findings.js";
+import { findingsCountOf, parseReviewFindings } from "../review/findings.js";
 import { preparePublicReviewOutput } from "../review/public-output.js";
 import { configuredPublicModelLabel, modelLabelRedactionTerms, publicModelLabelFor } from "../review/public-label.js";
 import { inlineReviewBufferFromFindings } from "../review/inline-fallback.js";
@@ -392,7 +392,7 @@ async function run(): Promise<void> {
   if (validatorFailoverModel) {
     console.log(
       `[config] validator_failover_model=${validatorFailoverModel.label} ` +
-        "(a final synthesis ending stall or invalid_output fails over once, within the live job clock)",
+        "(a final synthesis ending stall, invalid_output or max_turns fails over once, within the live job clock)",
     );
   }
 
@@ -560,8 +560,8 @@ async function run(): Promise<void> {
     return lensPrompt;
   };
 
-  // The caller-pinned validator-review failover for invalid_output ONLY
-  // (EHAC-2522). Undefined unless the caller set it; never the roster.
+  // The caller-pinned validator-review failover for invalid_output (EHAC-2522)
+  // and max_turns (EHAC-3644) ONLY. Undefined unless the caller set it; never the roster.
   const validatorReviewFailoverModel = resolveValidatorReviewFailoverModel(inputs);
   // Whether a final-validator failover could ever be budgeted on this runner: the same two
   // preconditions resolveSynthesisRetrySeconds enforces at run time (a job cap, and a
@@ -762,9 +762,9 @@ async function run(): Promise<void> {
         //   everything else                    -> no retry, fail closed
         //
         // The validator-review lane is narrower: provider_unavailable -> next
-        // distinct roster model; invalid_output -> the pinned
-        // validator_review_failover_model when one is set (EHAC-2522); nothing else,
-        // timeout included.
+        // distinct roster model; invalid_output (EHAC-2522) and max_turns (EHAC-3644)
+        // -> the pinned validator_review_failover_model when one is set; nothing else,
+        // timeout and stall included.
         //
         // `timeout` retries again since owner ruling 4 (2026-10-16): 35 of 39 measured
         // timeouts were mimo-v2.5-pro first attempts at 900s while the other lenses of
@@ -808,7 +808,7 @@ async function run(): Promise<void> {
 
     retriedLensIdsForSummary = lensRuns.filter(({ retried }) => retried).map(({ job }) => job.lens.id);
 
-    for (const { job, activeJob, lensResult, attempts, failoverUsed } of lensRuns) {
+    for (const { job, activeJob, lensResult, lensOutput, attempts, failoverUsed } of lensRuns) {
       // Charge for EVERY attempt — a retry spends real money, and a cost report
       // that hides it would understate the run. The pre-execution estimate prices
       // ONE extra reviewer attempt (costEstimateLensJobs), so a run with retries on
@@ -827,6 +827,9 @@ async function run(): Promise<void> {
         actualModelLabel: activeJob.model.label,
         failoverUsed,
         attemptCount: attempts.length,
+        // Recorded here, BEFORE the council policy is evaluated, so a breached council
+        // still says what its finished lenses found (EHAC-3675 groundwork).
+        findingsCount: findingsCountOf(lensResult.conclusion, lensOutput),
       }));
     }
 
@@ -1015,7 +1018,7 @@ async function run(): Promise<void> {
     return attemptResult;
   };
 
-  // EHAC-3622: a synthesis that ends stall or invalid_output fails over ONCE to the pinned
+  // EHAC-3622: a synthesis that ends stall, invalid_output or (EHAC-3644) max_turns fails over ONCE to the pinned
   // validator_failover_model, on the same lens reports, within what the live job clock
   // still affords. Unset, this is the single attempt it always was.
   const synthesis = await executeSynthesisWithFailover({
@@ -1068,6 +1071,9 @@ async function run(): Promise<void> {
     );
   }
   const parsedFindings = parseReviewFindings(publicOutput);
+  // The synthesized review's count, null unless it is a usable review: a failed or
+  // unusable synthesis posts GENERIC text, and counting that as 0 would read as "no findings".
+  const synthesisFindingsCount = publicConclusion === "success" ? parsedFindings.length : null;
   // ONE decisive validator run, as for a lens: the failover is described on it (assigned vs
   // actual model, attempt count), never split into a second logical run.
   runMetrics.push(metricFromPiRun(result, "validator", {
@@ -1075,6 +1081,7 @@ async function run(): Promise<void> {
     actualModelLabel: activeModelLabel,
     failoverUsed: synthesis.failoverUsed,
     attemptCount: synthesis.attempts.length,
+    findingsCount: synthesisFindingsCount,
   }));
   // Every physical synthesis attempt. Recording them keeps the attempt history a
   // COMPLETE account of what ran, rather than one that silently stops at the reviewer
@@ -1287,6 +1294,7 @@ async function run(): Promise<void> {
     costTotal,
     runs: runMetrics,
     findings: parsedFindings,
+    synthesisFindingsCount,
     promptBudgets: [...promptBudgetByKey.values()],
     retriedLensIds: retriedLensIdsForSummary,
     attempts: attemptMetrics,

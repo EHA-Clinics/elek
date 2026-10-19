@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **eha-v1.9.0.** `max_turns` fails over on both validator roles, and every review
+  run is told its turn budget (EHAC-3644). On 2026-10-19 deepseek-v4-pro-0813 hit
+  `max_turns` at 60-61 turns six times, in runaway loops with a max idle of ~4s: as the
+  advisor on eha_care #4866 (run 39234890907) and infra #1206 (run 39243801784), and as
+  the synthesis on eha_care #4781 (run 39226632625) and infra #1205 (runs 39233239224
+  and 39234047319). None failed over, and each breached its council. Now, with
+  `validator_review_failover_model` pinned, an advisor that ends `max_turns` fails over
+  once to it, exactly as `invalid_output` does; unpinned it stays blocking, and
+  `timeout` and `stall` still never fail over on that lane. `SYNTHESIS_FAILOVER_CLASSES`
+  is now `stall`, `invalid_output` and `max_turns`, so with `validator_failover_model`
+  pinned the synthesis fails over on `max_turns` within the live job clock; `timeout`
+  is unchanged. The serial budget guard and the `max_cost_usd` reservation already count
+  the pinned attempt whatever the class, so neither changes. The review-mode system
+  prompt now ends with "You have at most N turns for this task. Return your final answer
+  in the requested format before your last turn, even if your investigation is
+  incomplete.", with N from `max_turns`; legacy agent mode is unchanged. The review
+  summary also records findings counts (EHAC-3675 groundwork, so an errored council can
+  show whether it found anything): each `modelRuns[]` entry carries `findingsCount`,
+  set when the run finishes and so kept when the council later breaches or the
+  synthesis fails, and `review.findingsCount` carries the synthesized review's count.
+  Both use the public review's finding parser. `null` means not known: the run failed,
+  its output had no review signal, or (for the synthesis) there was no usable synthesis.
+  A review with no finding blocks is a real `0`. Additive; `version` stays 1.
+
 - **eha-v1.8.0.** `validator_failover_model` (EHAC-3622): an optional, single,
   caller-pinned model the FINAL validator (the synthesis) fails over to ONCE when its
   first attempt ends `stall` or `invalid_output`. The failover re-runs the synthesis on

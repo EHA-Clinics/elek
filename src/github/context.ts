@@ -195,7 +195,7 @@ export function parseValidatorRunTimeoutSecondsInput(value: string): number | un
 /**
  * Parse `validator_review_failover_model`, FAILING CLOSED on a list.
  *
- * An EMPTY value is the SHIPPED DEFAULT and means "no invalid_output failover":
+ * An EMPTY value is the SHIPPED DEFAULT and means "no invalid_output or max_turns failover":
  * the validator-review lane behaves exactly as it did before the input existed.
  * It is deliberately NOT defaulted to the reviewer roster — that would change the
  * policy outcome for every consumer that never asked for it.

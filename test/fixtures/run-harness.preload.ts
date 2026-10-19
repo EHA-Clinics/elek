@@ -9,8 +9,10 @@
  * decisions, summary finalizer) is the real code.
  *
  * Driven by environment:
- *   ELEK_HARNESS_SCRIPT  JSON `{ "synthesis": [<PiRunResult overrides>, ...] }`. The
- *                        nth non-lens run gets entry n; lens runs always succeed.
+ *   ELEK_HARNESS_SCRIPT  JSON `{ "synthesis": [<PiRunResult overrides>, ...],
+ *                        "lenses": { "<promptName>": <PiRunResult overrides> } }`. The nth
+ *                        non-lens run gets synthesis entry n; a lens run gets the entry
+ *                        named by its prompt (e.g. "lens-risk"), else it succeeds.
  *   ELEK_HARNESS_CALLS   file that receives one JSON line per model run.
  *   ELEK_HARNESS_JOB_STARTED_AT_MS  when the job started (epoch ms); unset = unmeasurable.
  */
@@ -20,6 +22,7 @@ import { appendFileSync, existsSync } from "fs";
 const src = new URL("../../src/", import.meta.url).pathname;
 const script = JSON.parse(process.env.ELEK_HARNESS_SCRIPT || "{}") as {
   synthesis?: Array<Record<string, unknown>>;
+  lenses?: Record<string, Record<string, unknown>>;
 };
 const callsPath = process.env.ELEK_HARNESS_CALLS || "";
 let synthesisCalls = 0;
@@ -36,7 +39,7 @@ mock.module(`${src}pi.ts`, () => ({
   ) => {
     const promptName = options.promptName || "prompt";
     const isLens = promptName.startsWith("lens-");
-    const scripted = isLens ? {} : (script.synthesis ?? [])[synthesisCalls++] ?? {};
+    const scripted = isLens ? script.lenses?.[promptName] ?? {} : (script.synthesis ?? [])[synthesisCalls++] ?? {};
     if (callsPath) {
       appendFileSync(
         callsPath,

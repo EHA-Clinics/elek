@@ -137,6 +137,20 @@ describe("buildPiArgs", () => {
     );
   });
 
+  it("states the turn budget, from maxTurns, in the appended system prompt (EHAC-3644)", () => {
+    for (const maxTurns of [90, 20]) {
+      const args = buildPiArgs({ ...baseInputs, maxTurns }, "/tmp/prompt.md", false);
+      const prompt = args[args.indexOf("--append-system-prompt") + 1];
+
+      expect(prompt).toContain(
+        `You have at most ${maxTurns} turns for this task. Return your final answer in the requested format ` +
+          "before your last turn, even if your investigation is incomplete.",
+      );
+      // The reviewer contract is still there, ahead of the budget.
+      expect(prompt.startsWith("You are Elek, a noninteractive read-only CI pull-request reviewer.")).toBe(true);
+    }
+  });
+
   it("does not impose the reviewer contract on legacy agent mode", () => {
     const args = buildPiArgs(
       { ...baseInputs, mode: "agent" },

@@ -1,3 +1,5 @@
+import { hasReviewSignal } from "./public-guards.js";
+
 export interface ParsedReviewFinding {
   id?: string;
   title: string;
@@ -48,6 +50,21 @@ export function parseReviewFindings(text: string): ParsedReviewFinding[] {
   }
 
   return findings;
+}
+
+/**
+ * How many findings one run's report holds, by the same parse the public review uses
+ * (EHAC-3675 groundwork). It is recorded per run so an ERRORED council still says
+ * whether its finished lenses found anything.
+ *
+ * `null` means "not known", never zero: the run failed, or its output carries no
+ * review signal at all (`hasReviewSignal`, the check that makes a public review
+ * usable), so there is nothing the parser could honestly have read. Prose with a
+ * review signal and no finding blocks (for example "No findings.") is a real 0.
+ */
+export function findingsCountOf(conclusion: "success" | "failure", output: string): number | null {
+  if (conclusion !== "success" || !hasReviewSignal(output)) return null;
+  return parseReviewFindings(output).length;
 }
 
 export function findingId(title: string, index: number): string {

@@ -24,7 +24,7 @@ const GLM = "openrouter/z-ai/glm-5.3-flash";
 interface HarnessRun {
   exitCode: number;
   summary: {
-    review: { terminalReason: string; finalModel: string };
+    review: { terminalReason: string; finalModel: string; findingsCount?: number | null };
     attempts: Array<Record<string, unknown>>;
     modelRuns: Array<Record<string, unknown>>;
     retriedLensIds: string[];
@@ -40,6 +40,8 @@ interface HarnessRun {
  */
 function runOrchestrator(params: {
   synthesis: Array<Record<string, unknown>>;
+  /** Lens results by prompt name ("lens-<id>"); an unnamed lens succeeds with "No findings." */
+  lenses?: Record<string, Record<string, unknown>>;
   inputs?: Record<string, string>;
   /** When the job started, in seconds before now. Default: now. */
   jobStartedSecondsAgo?: number;
@@ -94,7 +96,7 @@ function runOrchestrator(params: {
     GITHUB_TOKEN: "harness-placeholder",
     // When the job started, as the harness's job clock reports it.
     ELEK_HARNESS_JOB_STARTED_AT_MS: String(Date.now() - (params.jobStartedSecondsAgo ?? 0) * 1000),
-    ELEK_HARNESS_SCRIPT: JSON.stringify({ synthesis: params.synthesis }),
+    ELEK_HARNESS_SCRIPT: JSON.stringify({ synthesis: params.synthesis, lenses: params.lenses ?? {} }),
     ELEK_HARNESS_CALLS: callsPath,
   };
   for (const [name, value] of Object.entries(inputs)) env[`INPUT_${name}`] = value;
@@ -269,5 +271,73 @@ describe("orchestrator end to end: the final validator fails over once (EHAC-362
     expect(run.exitCode).not.toBe(0);
     expect(run.calls).toEqual([]);
     expect(run.stdout).toContain("validator_failover_model");
+  });
+});
+
+const finding = (title: string) =>
+  [`### ${title}`, "- Severity: important", "- Confidence: high", "- Path: `a.ts`", "- Line: 1",
+    "- Evidence: the changed line", "- Impact: wrong result", "- Fix: guard it"].join("\n");
+const twoFindings = `## Findings\n\n${finding("First defect")}\n\n${finding("Second defect")}\n`;
+const lensCounts = (run: HarnessRun) =>
+  run.summary.modelRuns.map((r) => [r.role, r.lensId ?? null, r.findingsCount]);
+
+/**
+ * EHAC-3675 needs to know whether an ERRORED council found anything before an admin may
+ * waive it. Each run records its own findings count when it finishes, so a breach or a
+ * failed synthesis afterwards cannot erase it.
+ */
+describe("findings counts in the review summary (EHAC-3675 groundwork)", () => {
+  it("a BREACHED council still records each finished lens's findings count", () => {
+    // eha_care #4866 run 39234890907: the advisor hit max_turns after the lenses succeeded.
+    const run = runOrchestrator({
+      synthesis: [{}],
+      inputs: { ADVISOR_MODEL: PRO },
+      lenses: {
+        "lens-risk": { output: twoFindings },
+        "lens-advisor-independent-audit": { conclusion: "failure", failureClass: "max_turns", output: "pi exceeded max turns" },
+      },
+    });
+
+    expect(run.summary.review.terminalReason).toBe("council_policy_breached");
+    expect(lensCounts(run)).toEqual([
+      ["reviewer", "risk", 2],
+      ["reviewer", "design", 0],
+      ["validator-review", "advisor-independent-audit", null],
+    ]);
+    // No synthesis ran, so there is no synthesized count; the key is still written.
+    expect(run.summary.review.findingsCount).toBeNull();
+  });
+
+  it("a lens whose output cannot be read as a review records null, not 0", () => {
+    const run = runOrchestrator({
+      synthesis: [{}],
+      lenses: { "lens-design": { output: "I looked at the change and stopped there." } },
+    });
+
+    expect(run.summary.review.terminalReason).toBe("completed");
+    expect(lensCounts(run).filter(([role]) => role === "reviewer")).toEqual([
+      ["reviewer", "risk", 0],
+      ["reviewer", "design", null],
+    ]);
+  });
+
+  it("records the synthesized review's findings count, on the summary and on the validator run", () => {
+    const run = runOrchestrator({ synthesis: [{ output: `## Review\n\n${twoFindings}` }] });
+
+    expect(run.summary.review.terminalReason).toBe("completed");
+    expect(run.summary.review.findingsCount).toBe(2);
+    expect(lensCounts(run).filter(([role]) => role === "validator")).toEqual([["validator", null, 2]]);
+  });
+
+  it("a FAILED synthesis records a null synthesized count and keeps the lens counts", () => {
+    const run = runOrchestrator({ synthesis: [stall], lenses: { "lens-risk": { output: twoFindings } } });
+
+    expect(run.summary.review.terminalReason).toBe("validator_failed");
+    expect(run.summary.review.findingsCount).toBeNull();
+    expect(lensCounts(run)).toEqual([
+      ["reviewer", "risk", 2],
+      ["reviewer", "design", 0],
+      ["validator", null, null],
+    ]);
   });
 });

@@ -105,7 +105,7 @@ export async function executeLensWithRetry(params: {
   job: ReviewJob;
   /** Reviewer models a failover may move to. Excludes the advisor by construction. */
   roster: readonly ModelSpec[];
-  /** Pinned validator-review failover for `invalid_output` only (EHAC-2522). */
+  /** Pinned validator-review failover for `invalid_output` (EHAC-2522) and `max_turns` (EHAC-3644) only. */
   validatorReviewFailoverModel?: ModelSpec;
   deps: LensExecutionDeps;
 }): Promise<LensExecutionResult> {

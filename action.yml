@@ -74,7 +74,7 @@ inputs:
     required: false
     default: ""
   max_turns:
-    description: "Maximum conversation turns (limits cost). Default: 20."
+    description: "Maximum conversation turns (limits cost). Review runs are told this budget in the system prompt. Default: 20."
     required: false
     default: "20"
   run_timeout_seconds:
@@ -289,9 +289,9 @@ inputs:
   validator_review_failover_model:
     description: >-
       Optional ONE model spec the validator-review audit lens fails over to,
-      ONCE, when its first attempt ends invalid_output. Empty (default) keeps
-      invalid_output a blocking no-retry on that lane, byte-identical to before.
-      timeout, stall and max_turns stay non-retryable on the validator lane
+      ONCE, when its first attempt ends invalid_output or (EHAC-3644) max_turns.
+      Empty (default) keeps both a blocking no-retry on that lane, byte-identical
+      to before. timeout and stall stay non-retryable on the validator lane
       whatever this is set to, and a model with the same identity as the one
       that failed is refused. Setting it counts the failover in the serial
       budget guard: with validator_run_timeout_seconds unset the guard demands
@@ -303,10 +303,10 @@ inputs:
   validator_failover_model:
     description: >-
       Optional ONE model spec the FINAL validator (the synthesis) fails over to,
-      ONCE, when its first attempt ends stall or invalid_output. The failover
-      re-runs the synthesis on the same lens reports; no lens re-runs. Empty
-      (default) keeps the synthesis a single attempt, byte-identical to before.
-      timeout, max_turns and every other class never fail over. A model with the
+      ONCE, when its first attempt ends stall, invalid_output or (EHAC-3644)
+      max_turns. The failover re-runs the synthesis on the same lens reports; no
+      lens re-runs. Empty (default) keeps the synthesis a single attempt,
+      byte-identical to before. timeout and every other class never fail over. A model with the
       same identity as the validator (last two path segments) is refused before
       any model runs. The failover gets min(validator budget, what the live job
       clock leaves after a 60s margin). The job clock is MEASURED from the start

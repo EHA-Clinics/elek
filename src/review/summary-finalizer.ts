@@ -101,6 +101,7 @@ export function createSummaryFinalizer(seed: Partial<ReviewSummaryInput> & {
         attempts: state.attempts ?? [],
         councilPolicy: state.councilPolicy,
         diffProvenance: state.diffProvenance,
+        synthesisFindingsCount: state.synthesisFindingsCount,
         terminalReason,
         ...(skipReason ? { skipReason } : {}),
         ...(failureMessage ? { failureMessage } : {}),

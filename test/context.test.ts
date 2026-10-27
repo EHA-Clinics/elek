@@ -14,6 +14,7 @@ import {
   parseInputs,
   parseMaxDegradedLensesInput,
   parseStallTimeoutSecondsInput,
+  parseFirstTurnTimeoutSecondsInput,
 } from "../src/github/context";
 
 let tmp: string;
@@ -289,6 +290,35 @@ describe("parseInputs", () => {
 /* ────────────────────────────────────────────────────────────────────────────
  * stall_timeout_seconds — FAILS CLOSED, unlike every other numeric input here.
  * ──────────────────────────────────────────────────────────────────────────── */
+describe("parseFirstTurnTimeoutSecondsInput", () => {
+  it("resolves an unset or empty input to the documented default of 0", () => {
+    expect(parseFirstTurnTimeoutSecondsInput("")).toBe(0);
+    expect(parseFirstTurnTimeoutSecondsInput("   ")).toBe(0);
+  });
+
+  it("accepts a non-negative integer number of seconds", () => {
+    expect(parseFirstTurnTimeoutSecondsInput("0")).toBe(0);
+    expect(parseFirstTurnTimeoutSecondsInput("300")).toBe(300);
+    expect(parseFirstTurnTimeoutSecondsInput(" 45 ")).toBe(45);
+  });
+
+  it("names ITS OWN input on a malformed value, not the stall input", () => {
+    // Two watchdogs share a parser shape; a shared error would send an operator
+    // to the wrong input while the run refuses to start.
+    for (const bad of ["12O", "-1", "1.5", "abc"]) {
+      expect(() => parseFirstTurnTimeoutSecondsInput(bad)).toThrow(/first_turn_timeout_seconds/);
+      expect(() => parseFirstTurnTimeoutSecondsInput(bad)).not.toThrow(/stall_timeout_seconds/);
+    }
+  });
+
+  it("is wired into parseInputs and defaults to disabled", () => {
+    delete process.env.INPUT_FIRST_TURN_TIMEOUT_SECONDS;
+    expect(parseInputs().firstTurnTimeoutSeconds).toBe(0);
+    process.env.INPUT_FIRST_TURN_TIMEOUT_SECONDS = "300";
+    expect(parseInputs().firstTurnTimeoutSeconds).toBe(300);
+  });
+});
+
 describe("parseStallTimeoutSecondsInput", () => {
   it("resolves an unset or empty input to the documented default of 0", () => {
     expect(parseStallTimeoutSecondsInput("")).toBe(0);

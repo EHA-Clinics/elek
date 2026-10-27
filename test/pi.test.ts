@@ -550,6 +550,58 @@ describe("runPi stream-idle watchdog", () => {
     }
   }, 20_000);
 
+  it("does not leak the first-turn timer when pi exits before any tool call", async () => {
+    const { cleanup } = fakePi("runaway-early-exit", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      "emit({ type: 'turn_start' });",
+      "process.exit(1);",
+    ]);
+    try {
+      const started = Date.now();
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 60, stallTimeoutSeconds: 0, firstTurnTimeoutSeconds: 300 },
+        undefined,
+        false,
+        { promptName: "runaway-early-exit" },
+      );
+
+      // If the timer were left armed, this process would sit on a 300s handle.
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(result.conclusion).toBe("failure");
+      expect(result.failureClass).not.toBe("runaway");
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("never arms the first-turn timer when the run has no tools", async () => {
+    const { cleanup } = fakePi("runaway-tools-disabled", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      "emit({ type: 'turn_start' });",
+      `setTimeout(() => { emit(${okAssistant}); process.exit(0); }, 1500);`,
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, tools: "", runTimeoutSeconds: 60, stallTimeoutSeconds: 0, firstTurnTimeoutSeconds: 1 },
+        undefined,
+        false,
+        { promptName: "runaway-tools-disabled" },
+      );
+
+      // A tool-less pass cannot start a tool call: capping it would be a false kill.
+      expect(result.conclusion).toBe("success");
+      expect(result.terminationReason).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
   it("does not report runaway when a tool call starts before the cap", async () => {
     const { cleanup } = fakePi("runaway-tool-call", [
       "#!/usr/bin/env node",

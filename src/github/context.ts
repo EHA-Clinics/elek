@@ -74,6 +74,20 @@ function parsePositiveIntegerInput(name: string, value: string, defaultValue: nu
  *
  * @throws {Error} when the value is present and not a non-negative integer.
  */
+function parseNonNegativeSecondsInput(value: string, inputName: string): number {
+  const normalized = value.trim();
+  if (!normalized) return 0;
+  const parsed = Number(normalized);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(
+      `Invalid ${inputName} input: "${normalized}". ` +
+        "Expected a non-negative integer number of seconds (0 disables the watchdog). " +
+        "Refusing to run: a watchdog that silently disables itself on a typo is not a watchdog.",
+    );
+  }
+  return parsed;
+}
+
 export function parseStallTimeoutSecondsInput(value: string): number {
   const normalized = value.trim();
   if (!normalized) return 0;
@@ -86,6 +100,11 @@ export function parseStallTimeoutSecondsInput(value: string): number {
     );
   }
   return parsed;
+}
+
+/** Parse `first_turn_timeout_seconds`; the error must name THIS input. */
+export function parseFirstTurnTimeoutSecondsInput(value: string): number {
+  return parseNonNegativeSecondsInput(value, "first_turn_timeout_seconds");
 }
 
 /**
@@ -312,7 +331,7 @@ export function parseInputs(): ActionInputs {
     openRouterReasoningModes: parseReasoningModes(core.getInput("openrouter_model_reasoning_modes")),
     reasoningMaxTokens: parseReasoningMaxTokensInput(core.getInput("reasoning_max_tokens")),
     stallTimeoutSeconds: parseStallTimeoutSecondsInput(core.getInput("stall_timeout_seconds")),
-    firstTurnTimeoutSeconds: parseStallTimeoutSecondsInput(core.getInput("first_turn_timeout_seconds")),
+    firstTurnTimeoutSeconds: parseFirstTurnTimeoutSecondsInput(core.getInput("first_turn_timeout_seconds")),
     tools: core.getInput("tools") || "",
     configPath: core.getInput("config_path") || ".elek.yml",
     baseBranch: core.getInput("base_branch") || undefined,

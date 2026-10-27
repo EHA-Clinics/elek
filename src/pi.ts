@@ -474,7 +474,10 @@ export async function runPi(
     // no tool call past this cap is runaway generation, not a slow review; it is
     // reported as `runaway` (a retryable class) instead of `timeout`.
     const firstTurnTimeoutSeconds = Math.max(0, inputs.firstTurnTimeoutSeconds ?? 0);
-    const runawayWatchdogEnabled = firstTurnTimeoutSeconds > 0 && useJsonMode;
+    // A run with NO tools can never start a tool call, so the cap would kill a
+    // healthy tool-less pass. Gate it on tools actually being enabled.
+    const toolsEnabledForRun = inputs.tools.trim().length > 0;
+    const runawayWatchdogEnabled = firstTurnTimeoutSeconds > 0 && useJsonMode && toolsEnabledForRun;
     if (firstTurnTimeoutSeconds > 0 && !useJsonMode) {
       console.warn(
         "first-turn watchdog disabled: ELEK_PI_TEXT_MODE emits no incremental stream, " +
@@ -710,6 +713,7 @@ export async function runPi(
       settled = true;
       clearTimeout(timeoutTimer);
       clearIdleTimer();
+      clearFirstTurnTimer();
       if (forceKillTimer) clearTimeout(forceKillTimer);
       const telemetry = streamTelemetry();
       const elapsed = (Date.now() - startTime) / 1000;
@@ -832,6 +836,7 @@ export async function runPi(
       settled = true;
       clearTimeout(timeoutTimer);
       clearIdleTimer();
+      clearFirstTurnTimer();
       if (forceKillTimer) clearTimeout(forceKillTimer);
       const telemetry = streamTelemetry();
       const elapsed = (Date.now() - startTime) / 1000;

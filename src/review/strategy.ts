@@ -82,9 +82,12 @@ export const MAX_LENS_ATTEMPTS = 2;
  * The split is the point. A repeated model-specific stall is deterministic per
  * (model, prompt) pair — eha_care PR #3291 re-hung on a byte-identical prompt —
  * so retrying the SAME model spends a second full wall-clock budget to reproduce
- * the same hang. A transient provider fault is the opposite: the model is fine
- * and the next request very likely succeeds, while moving to another model would
- * change the review for no reason.
+ * the same hang. A transient provider fault USED to retry the same model on the
+ * theory that the model was fine and the next request would succeed; DL-20261023-405
+ * removes that, because a same-model retry cannot change an endpoint-bound outcome
+ * and a second identical request is exactly the repetition the stall evidence warned
+ * about. Every retry now moves to a distinct model; a roster with no distinct
+ * alternative fails closed rather than re-asking the same endpoint.
  *
  * `provider_unavailable` (HTTP 404) moves to a distinct model: the status says THIS model is
  * not reachable for this account — a guardrail denial or an empty endpoint pool — which is
@@ -97,7 +100,7 @@ export const MAX_LENS_ATTEMPTS = 2;
  * state, and it must stay that way: retrying on a class we could not establish
  * is guessing with the job's wall clock.
  *
- * `timeout` RETRIES ONCE on the next distinct model, on a SHORTER per-attempt
+ * `timeout` RETRIES ONCE on the next distinct model, on the FULL per-attempt
  * budget (owner ruling 4, 2026-10-16, EHAC-2844). History: the row shipped as
  * `next-distinct-model`, was switched to no-retry after eha_care #3680 (run
  * 32105023640: four retries on four models, three timed out again, every attempt
@@ -125,7 +128,7 @@ export const FAILURE_RETRY_POLICY: Readonly<
   timeout: { retry: true, target: "next-distinct-model" },
   max_turns: { retry: true, target: "next-distinct-model" },
   invalid_output: { retry: true, target: "next-distinct-model" },
-  provider_transient: { retry: true, target: "same-model" },
+  provider_transient: { retry: true, target: "next-distinct-model" },
   provider_unavailable: { retry: true, target: "next-distinct-model" },
   provider_permanent: { retry: false, target: "same-model" },
   process_error: { retry: false, target: "same-model" },

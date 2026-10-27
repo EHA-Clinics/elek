@@ -801,14 +801,16 @@ describe("resolveLensRetry", () => {
     expect(decision.retry).toBe(false);
   });
 
-  it("retries a transient provider fault on the SAME model", () => {
+  it("retries a transient provider fault on the next distinct model", () => {
+    // DL-20261023-405: a same-model retry cannot change an endpoint-bound outcome, and a
+    // second identical request is the repetition the stall evidence warned about.
     const decision = resolveLensRetry({ ...base, failureClass: "provider_transient" });
     expect(decision.retry).toBe(true);
-    expect(decision.failover).toBe(false);
-    expect(decision.model!.label).toBe(PRO.label);
+    expect(decision.failover).toBe(true);
+    expect(decision.model!.label).toBe(MIMO.label);
   });
 
-  it("retries a timeout ONCE on the next distinct model, with a shorter per-attempt budget", () => {
+  it("retries a timeout ONCE on the next distinct model, with the full per-attempt budget", () => {
     // Owner ruling 4 (2026-10-16), on census data: 39 timeout attempts in 682 council
     // records (2026-10-06..16), 35 of them xiaomi/mimo-v2.5-pro on the design lens, every
     // one a FIRST attempt at exactly 900s and never retried, while the other lenses of the
@@ -818,9 +820,9 @@ describe("resolveLensRetry", () => {
     expect(decision.retry).toBe(true);
     expect(decision.failover).toBe(true);
     expect(decision.model!.label).toBe(MIMO.label);
-    // min(floor(900 / 2), 65 x 60 - 37 - 905 - 1200 - 60) = min(450, 1698)
-    expect(decision.runTimeoutSeconds).toBe(450);
-    expect(decision.reason).toContain("450s");
+    // min(900, 65 x 60 - 37 - 905 - 1200 - 60) = min(900, 1698), full budget (DL-405)
+    expect(decision.runTimeoutSeconds).toBe(900);
+    expect(decision.reason).toContain("900s");
 
     // PAIRED DIRECTION: stall still moves models, and carries NO per-attempt override,
     // so the shorter budget is a timeout-only property.
@@ -874,10 +876,10 @@ describe("resolveLensRetry", () => {
     expect(decision.reason).toContain("roster offers none");
   });
 
-  it("still permits a same-model transient retry on a single-model roster", () => {
+  it("fails closed for a transient fault on a single-model roster", () => {
     const decision = resolveLensRetry({ ...base, failureClass: "provider_transient", roster: [PRO] });
-    expect(decision.retry).toBe(true);
-    expect(decision.model!.label).toBe(PRO.label);
+    expect(decision.retry).toBe(false);
+    expect(decision.reason).toContain("roster offers none");
   });
 
   it("permits exactly ONE outer retry, never a hidden third attempt", () => {

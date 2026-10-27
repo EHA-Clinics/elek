@@ -189,9 +189,15 @@ export interface TimeoutRetryBudgetInput {
 }
 
 /**
- * The per-attempt wall clock for the ONE timeout retry (owner ruling 4, EHAC-2844).
+ * The per-attempt wall clock for the ONE timeout retry (owner ruling 4, EHAC-2844;
+ * amended by DL-20261023-405: the retry gets the FULL reviewer budget).
  *
- *   T2 = min(floor(R / 2), jobTimeoutMinutes x 60 - setup - elapsed - V - margin)
+ *   T2 = min(R, jobTimeoutMinutes x 60 - setup - elapsed - V - margin)
+ *
+ * The half budget could not finish a lens that legitimately needs more than R/2
+ * (healthy lenses take up to 983s), and the guard already asserts the 2R bound:
+ * 37 + max(2x900, 2x1200) + 1200 = 3637s fits a 65-minute job. The live clock
+ * still binds, so the retry can never push the job past its cap.
  *
  * The second term is what the job can still afford: the final synthesis (V) and a
  * margin must still fit after the retry. Returns undefined, meaning NO retry, when
@@ -214,9 +220,8 @@ export function resolveTimeoutRetrySeconds({
   if (jobTimeoutMinutes === undefined) return undefined;
   const v = validatorSeconds ?? runTimeoutSeconds;
   if (![runTimeoutSeconds, v, jobTimeoutMinutes, elapsedSeconds].every(Number.isFinite)) return undefined;
-  const half = Math.floor(runTimeoutSeconds / 2);
   const remaining = Math.floor(jobTimeoutMinutes * 60 - setupSeconds - elapsedSeconds - v - marginSeconds);
-  const t2 = Math.min(half, remaining);
+  const t2 = Math.min(runTimeoutSeconds, remaining);
   return t2 >= minSeconds ? t2 : undefined;
 }
 

@@ -116,14 +116,15 @@ function attemptMetric(params: {
  */
 function applyToolAccessVerdict(result: PiRunResult): PiRunResult {
   const calls = result.toolCalls ?? 0;
-  const errors = result.toolErrors ?? 0;
-  if (result.conclusion === "success" && calls > 0 && errors === calls) {
+  const successes = result.toolSuccesses ?? 0;
+  if (result.conclusion === "success" && calls > 0 && successes === 0) {
     return {
       ...result,
       conclusion: "failure",
       failureClass: "tool_access",
       output:
-        `${result.output}\n\n[eval] every tool call in this run failed (${errors}/${calls}); ` +
+        `${result.output}\n\n[eval] no tool call in this run succeeded (${calls} started, ` +
+        `${result.toolErrors ?? 0} errored, ${calls - successes - (result.toolErrors ?? 0)} unclosed); ` +
         "a review with no tool evidence is not a clean pass.",
     };
   }

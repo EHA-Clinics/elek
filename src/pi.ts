@@ -387,6 +387,7 @@ export async function runPi(
   let sessionId: string | undefined;
   let toolCount = 0;
   let toolErrorCount = 0;
+  let toolSuccessCount = 0;
   let turnCount = 0;
   let providerRetries = 0;
   let finalAssistant: PiAssistantMessage | undefined;
@@ -562,6 +563,7 @@ export async function runPi(
         malformedLineCount,
         toolCalls: toolCount,
         toolErrors: toolErrorCount,
+        toolSuccesses: toolSuccessCount,
         ...(lastEventType ? { lastEventType } : {}),
       };
     };
@@ -671,6 +673,7 @@ export async function runPi(
 
         case "tool_execution_end":
           if (event.isError) toolErrorCount++;
+          else toolSuccessCount++;
           onProgress?.({
             type: "tool_end",
             detail: event.toolName || "tool",

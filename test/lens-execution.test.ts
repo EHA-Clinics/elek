@@ -81,8 +81,8 @@ describe("executeLensWithRetry", () => {
   it("downgrades a lens whose EVERY tool call failed, and retries it", async () => {
     // eha-care-infra #1373: the tests lens had no tool access, produced no
     // verifiable findings, and the council still reported COMPLETE/SUCCESS.
-    const blind = piResult({ modelLabel: PRO.label, toolCalls: 2, toolErrors: 2 });
-    const rec = recorder([blind, piResult({ modelLabel: MIMO.label, toolCalls: 2, toolErrors: 0 })]);
+    const blind = piResult({ modelLabel: PRO.label, toolCalls: 2, toolErrors: 2, toolSuccesses: 0 });
+    const rec = recorder([blind, piResult({ modelLabel: MIMO.label, toolCalls: 2, toolErrors: 0, toolSuccesses: 2 })]);
     const out = await executeLensWithRetry({ job: job(PRO), roster: ROSTER, deps: { runAttempt: rec.runAttempt } });
 
     expect(out.attemptMetrics[0].conclusion).toBe("failure");
@@ -93,8 +93,19 @@ describe("executeLensWithRetry", () => {
     expect(out.lensResult.conclusion).toBe("success");
   });
 
+  it("downgrades a lens whose tool call never completed (no success, unclosed)", async () => {
+    // A tool_execution_start with no matching end is not evidence either: the run
+    // ended mid-call. `successes === 0` covers it.
+    const unclosed = piResult({ modelLabel: PRO.label, toolCalls: 1, toolErrors: 0, toolSuccesses: 0 });
+    const rec = recorder([unclosed, piResult({ modelLabel: MIMO.label, toolCalls: 1, toolErrors: 0, toolSuccesses: 1 })]);
+    const out = await executeLensWithRetry({ job: job(PRO), roster: ROSTER, deps: { runAttempt: rec.runAttempt } });
+
+    expect(out.attemptMetrics[0].failureClass).toBe("tool_access");
+    expect(out.lensResult.conclusion).toBe("success");
+  });
+
   it("keeps a lens green when SOME tool calls succeeded", async () => {
-    const partial = piResult({ modelLabel: PRO.label, toolCalls: 3, toolErrors: 1 });
+    const partial = piResult({ modelLabel: PRO.label, toolCalls: 3, toolErrors: 1, toolSuccesses: 2 });
     const rec = recorder([partial]);
     const out = await executeLensWithRetry({ job: job(PRO), roster: ROSTER, deps: { runAttempt: rec.runAttempt } });
 

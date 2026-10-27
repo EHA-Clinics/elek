@@ -634,6 +634,7 @@ describe("runPi stream-idle watchdog", () => {
       const result = await runPi("review", { ...baseInputs, runTimeoutSeconds: 60 }, undefined, false, { promptName: "tool-errors" });
       expect(result.toolCalls).toBe(2);
       expect(result.toolErrors).toBe(1);
+      expect(result.toolSuccesses).toBe(1);
     } finally {
       cleanup();
     }

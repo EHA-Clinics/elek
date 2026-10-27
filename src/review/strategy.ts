@@ -126,6 +126,7 @@ export const FAILURE_RETRY_POLICY: Readonly<
 > = Object.freeze({
   stall: { retry: true, target: "next-distinct-model" },
   runaway: { retry: true, target: "next-distinct-model" },
+  tool_access: { retry: true, target: "next-distinct-model" },
   timeout: { retry: true, target: "next-distinct-model" },
   max_turns: { retry: true, target: "next-distinct-model" },
   invalid_output: { retry: true, target: "next-distinct-model" },

@@ -618,6 +618,28 @@ describe("runPi stream-idle watchdog", () => {
     }
   }, 20_000);
 
+  it("counts tool calls and tool errors from the stream", async () => {
+    const { cleanup } = fakePi("tool-errors", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      "emit({ type: 'turn_start' });",
+      "emit({ type: 'tool_execution_start', toolName: 'read', toolCallId: '1' });",
+      "emit({ type: 'tool_execution_end', toolName: 'read', toolCallId: '1', isError: true });",
+      "emit({ type: 'tool_execution_start', toolName: 'grep', toolCallId: '2' });",
+      "emit({ type: 'tool_execution_end', toolName: 'grep', toolCallId: '2', isError: false });",
+      `emit(${okAssistant}); process.exit(0);`,
+    ]);
+    try {
+      const result = await runPi("review", { ...baseInputs, runTimeoutSeconds: 60 }, undefined, false, { promptName: "tool-errors" });
+      expect(result.toolCalls).toBe(2);
+      expect(result.toolErrors).toBe(1);
+      expect(result.toolSuccesses).toBe(1);
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
   it("does not report runaway when a tool call starts before the cap", async () => {
     const { cleanup } = fakePi("runaway-tool-call", [
       "#!/usr/bin/env node",

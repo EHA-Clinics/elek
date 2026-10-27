@@ -224,6 +224,7 @@ export type PiFailureClass =
   | "stall"
   | "runaway"
   | "timeout"
+  | "tool_access"
   | "max_turns"
   | "invalid_output"
   | "provider_transient"
@@ -254,6 +255,12 @@ export interface PiStreamTelemetry {
   malformedLineCount?: number;
   /** `type` of the last successfully parsed stream event. */
   lastEventType?: string;
+  /** Count of tool calls the model started (tool_execution_start events). */
+  toolCalls?: number;
+  /** Count of those tool calls that ended with isError. */
+  toolErrors?: number;
+  /** Count of tool calls that ended WITHOUT isError (unclosed calls count for none). */
+  toolSuccesses?: number;
 }
 
 export interface PiRunResult extends PiStreamTelemetry {

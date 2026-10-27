@@ -78,12 +78,12 @@ describe("executeLensWithRetry", () => {
     expect(out.lensResult.usage.modelLabel).toBe(MIMO.label);
   });
 
-  it("retries a transient provider fault on the same model", async () => {
-    const rec = recorder([fail(PRO.label, "provider_transient"), piResult({ modelLabel: PRO.label })]);
+  it("retries a transient provider fault on the next distinct model", async () => {
+    const rec = recorder([fail(PRO.label, "provider_transient"), piResult({ modelLabel: MIMO.label })]);
     const out = await executeLensWithRetry({ job: job(PRO), roster: ROSTER, deps: { runAttempt: rec.runAttempt } });
 
-    expect(rec.seen.map((s) => s.model)).toEqual([PRO.label, PRO.label]);
-    expect(out.failoverUsed).toBe(false);
+    expect(rec.seen.map((s) => s.model)).toEqual([PRO.label, MIMO.label]);
+    expect(out.failoverUsed).toBe(true);
     expect(out.retried).toBe(true);
   });
 
@@ -177,7 +177,7 @@ describe("executeLensWithRetry", () => {
     };
   }
 
-  it("retries a timeout ONCE, on the next distinct model, with the shorter per-attempt budget", async () => {
+  it("retries a timeout ONCE, on the next distinct model, with the full per-attempt budget", async () => {
     // Ruling 4: 35 of 39 measured timeouts were mimo-v2.5-pro first attempts at 900s while
     // the other lenses of the same runs finished; the overrun was the model's.
     const rec = overrideRecorder([fail(PRO.label, "timeout"), piResult({ modelLabel: MIMO.label })]);
@@ -188,8 +188,8 @@ describe("executeLensWithRetry", () => {
     });
 
     expect(rec.seen.map((s) => s.model)).toEqual([PRO.label, MIMO.label]);
-    // The first attempt keeps the caller's R; only the retry is shortened to T2 = 450s.
-    expect(rec.seen.map((s) => s.runTimeoutSeconds)).toEqual([undefined, 450]);
+    // The first attempt keeps the caller's R; the retry now gets the full budget (DL-405).
+    expect(rec.seen.map((s) => s.runTimeoutSeconds)).toEqual([undefined, 900]);
     expect(rec.seen[1].promptName).toBe("lens-tests-retry");
     expect(out.retried).toBe(true);
     expect(out.failoverUsed).toBe(true);
@@ -197,7 +197,7 @@ describe("executeLensWithRetry", () => {
     expect(out.lensResult.conclusion).toBe("success");
     // The census can see the shorter budget on the retry, and only there.
     expect(out.attemptMetrics[0]).not.toHaveProperty("runTimeoutSeconds");
-    expect(out.attemptMetrics[1].runTimeoutSeconds).toBe(450);
+    expect(out.attemptMetrics[1].runTimeoutSeconds).toBe(900);
   });
 
   it("never spends a third attempt after a second timeout", async () => {

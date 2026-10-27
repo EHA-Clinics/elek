@@ -23,6 +23,7 @@ const baseInputs: ActionInputs = {
   maxTurns: 20,
   runTimeoutSeconds: 600,
   stallTimeoutSeconds: 0,
+  firstTurnTimeoutSeconds: 0,
   tools: "read,grep,find,ls",
   configPath: ".elek.yml",
   branchPrefix: "elek/",
@@ -516,6 +517,151 @@ describe("runPi stream-idle watchdog", () => {
       expect(result.durationSeconds).toBeLessThan(5);
       expect(result.timeToFirstEventSeconds).not.toBeNull();
       expect(result.lastEventType).toBe("turn_start");
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("terminates a first turn that never reaches a tool call with failureClass=runaway", async () => {
+    const { cleanup } = fakePi("runaway-first-turn", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      "emit({ type: 'turn_start' });",
+      // ACTIVE stream, no tool call: the idle watchdog would never fire here.
+      "setInterval(() => emit({ type: 'turn_start' }), 150);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 60, stallTimeoutSeconds: 0, firstTurnTimeoutSeconds: 1 },
+        undefined,
+        false,
+        { promptName: "runaway-first-turn" },
+      );
+
+      expect(result.conclusion).toBe("failure");
+      expect(result.failureClass).toBe("runaway");
+      expect(result.terminationReason).toBe("runaway");
+      expect(result.durationSeconds).toBeLessThan(5);
+      expect(result.streamEventCount!).toBeGreaterThan(2);
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("does not leak the first-turn timer when pi exits before any tool call", async () => {
+    const { cleanup } = fakePi("runaway-early-exit", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      "emit({ type: 'turn_start' });",
+      "process.exit(1);",
+    ]);
+    const created: unknown[] = [];
+    const cleared: unknown[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    globalThis.setTimeout = ((fn: TimerHandler, ms?: number, ...args: unknown[]) => {
+      const handle = (realSetTimeout as typeof setTimeout)(fn as () => void, ms, ...args);
+      if (ms === 300_000) created.push(handle);
+      return handle;
+    }) as unknown as typeof setTimeout;
+    globalThis.clearTimeout = ((handle?: unknown) => {
+      cleared.push(handle);
+      return (realClearTimeout as typeof clearTimeout)(handle as Parameters<typeof clearTimeout>[0]);
+    }) as typeof clearTimeout;
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 60, stallTimeoutSeconds: 0, firstTurnTimeoutSeconds: 300 },
+        undefined,
+        false,
+        { promptName: "runaway-early-exit" },
+      );
+
+      expect(result.conclusion).toBe("failure");
+      expect(result.failureClass).not.toBe("runaway");
+      // The 300s handle must have been CREATED and then CLEARED on the settle
+      // path; a leaked ref'd handle would keep the process alive for 5 minutes.
+      expect(created).toHaveLength(1);
+      expect(cleared).toContain(created[0]);
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+      cleanup();
+    }
+  }, 20_000);
+
+  it("never arms the first-turn timer when the run has no tools", async () => {
+    const { cleanup } = fakePi("runaway-tools-disabled", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      "emit({ type: 'turn_start' });",
+      `setTimeout(() => { emit(${okAssistant}); process.exit(0); }, 1500);`,
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, tools: "", runTimeoutSeconds: 60, stallTimeoutSeconds: 0, firstTurnTimeoutSeconds: 1 },
+        undefined,
+        false,
+        { promptName: "runaway-tools-disabled" },
+      );
+
+      // A tool-less pass cannot start a tool call: capping it would be a false kill.
+      expect(result.conclusion).toBe("success");
+      expect(result.terminationReason).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("does not report runaway when a tool call starts before the cap", async () => {
+    const { cleanup } = fakePi("runaway-tool-call", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      "emit({ type: 'turn_start' });",
+      "setTimeout(() => emit({ type: 'tool_execution_start', toolName: 'read', toolCallId: '1' }), 300);",
+      "setTimeout(() => emit({ type: 'tool_execution_end', toolName: 'read', toolCallId: '1', isError: false }), 500);",
+      // OUTLIVE the 2s cap: if the first tool call did not disarm the watchdog,
+      // this run is killed and the assertion below fails.
+      `setTimeout(() => { emit(${okAssistant}); process.exit(0); }, 2600);`,
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 60, stallTimeoutSeconds: 0, firstTurnTimeoutSeconds: 2 },
+        undefined,
+        false,
+        { promptName: "runaway-tool-call" },
+      );
+
+      expect(result.conclusion).toBe("success");
+      expect(result.terminationReason).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("keeps stall for a silent stream when both watchdogs are set", async () => {
+    const { cleanup } = fakePi("stall-not-runaway", [
+      "#!/usr/bin/env node",
+      "setInterval(() => {}, 1000);",
+    ]);
+    try {
+      const result = await runPi(
+        "review",
+        { ...baseInputs, runTimeoutSeconds: 60, stallTimeoutSeconds: 1, firstTurnTimeoutSeconds: 5 },
+        undefined,
+        false,
+        { promptName: "stall-not-runaway" },
+      );
+
+      // No activity at all is a stall; the first-turn cap never gets to fire.
+      expect(result.failureClass).toBe("stall");
     } finally {
       cleanup();
     }

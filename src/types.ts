@@ -54,6 +54,17 @@ export interface ActionInputs {
    * as `stall` — a distinct failure class the retry policy can act on.
    */
   stallTimeoutSeconds: number;
+  /**
+   * First-turn runaway watchdog, in seconds. 0 disables it.
+   *
+   * The idle watchdog above cannot see this failure shape: glm's failing
+   * councils emitted 1k-15k stream events over one turn with NO tool call, so
+   * activity never stopped and the idle timer never fired. This timer bounds the
+   * first turn — if no `tool_execution_start` arrives within the cap the run is
+   * runaway generation, not a slow review, and it is terminated as `runaway` so
+   * the retry policy can move it to a distinct model.
+   */
+  firstTurnTimeoutSeconds: number;
   tools: string;
   /** Repo-local config file path, e.g. .elek.yml. */
   configPath: string;
@@ -211,6 +222,7 @@ export interface GitHubEntityContext {
  */
 export type PiFailureClass =
   | "stall"
+  | "runaway"
   | "timeout"
   | "max_turns"
   | "invalid_output"
@@ -221,7 +233,7 @@ export type PiFailureClass =
   | "unknown";
 
 /** The subset of PiFailureClass that elek itself causes by killing the child. */
-export type PiTerminationReason = "stall" | "timeout" | "max_turns";
+export type PiTerminationReason = "stall" | "runaway" | "timeout" | "max_turns";
 
 /**
  * Stream telemetry for one physical pi attempt.

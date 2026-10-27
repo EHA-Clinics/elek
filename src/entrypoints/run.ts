@@ -756,9 +756,9 @@ async function run(): Promise<void> {
         // WHAT that retry changes now depends on the terminal failure class:
         //
         //   stall / max_turns / invalid_output -> next distinct model
-        //   timeout                            -> next distinct model, on a SHORTER
-        //                                         budget (resolveTimeoutRetrySeconds)
-        //   provider_transient                 -> same model
+        //   timeout                            -> next distinct model, full budget
+        //                                         (resolveTimeoutRetrySeconds, DL-405)
+        //   provider_transient                 -> next distinct model (DL-405)
         //   everything else                    -> no retry, fail closed
         //
         // The validator-review lane is narrower: provider_unavailable -> next

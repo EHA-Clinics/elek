@@ -160,6 +160,25 @@ inputs:
       silently disables itself on a typo is not a watchdog.
     required: false
     default: "0"
+  first_turn_timeout_seconds:
+    description: >
+      First-turn runaway watchdog, in seconds. Terminates a model run that has
+      not started a tool call within this wall clock, and reports failure class
+      `runaway`. Distinct from `stall`: the stream is ACTIVE here (thousands of
+      events), it just never reaches a tool call, which is the shape glm-5.3-flash
+      showed in the 2026-10-27 council diagnosis (turns=1, tools=0, 1k-15k
+      events, no idle gap for the stall watchdog to catch).
+
+      Default "0" (disabled), so an existing consumer is byte-identical. Pick a
+      value above the p99 time-to-first-tool-call of healthy runs (about 300s on
+      the fleet's measured councils) and below run_timeout_seconds.
+
+      Ignored in ELEK_PI_TEXT_MODE, where no stream exists to observe.
+
+      An empty value means the default. A value that is not a non-negative
+      integer is a configuration FAILURE and refuses to run.
+    required: false
+    default: "0"
   tools:
     description: "Legacy low-level pi tool allowlist. Review modes use mode presets; prefer mode unless debugging agent mode."
     required: false
@@ -428,6 +447,7 @@ runs:
         INPUT_OPENROUTER_MODEL_REASONING_MODES: ${{ inputs.openrouter_model_reasoning_modes }}
         INPUT_REASONING_MAX_TOKENS: ${{ inputs.reasoning_max_tokens }}
         INPUT_STALL_TIMEOUT_SECONDS: ${{ inputs.stall_timeout_seconds }}
+        INPUT_FIRST_TURN_TIMEOUT_SECONDS: ${{ inputs.first_turn_timeout_seconds }}
         INPUT_TOOLS: ${{ inputs.tools }}
         INPUT_CONFIG_PATH: ${{ inputs.config_path }}
         INPUT_BASE_BRANCH: ${{ inputs.base_branch }}

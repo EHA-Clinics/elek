@@ -432,10 +432,16 @@ export async function runPi(
     });
     let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let firstTurnTimer: ReturnType<typeof setTimeout> | undefined;
+    let sawToolCall = false;
 
     const clearIdleTimer = () => {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = undefined;
+    };
+    const clearFirstTurnTimer = () => {
+      if (firstTurnTimer) clearTimeout(firstTurnTimer);
+      firstTurnTimer = undefined;
     };
 
     // The FIRST terminal condition wins. A later timer callback — or a close
@@ -449,6 +455,7 @@ export async function runPi(
       terminationReason = reason;
       console.error(message);
       clearIdleTimer();
+      clearFirstTurnTimer();
       killPiProcess(child.pid, "SIGTERM");
       forceKillTimer = setTimeout(() => {
         if (!settled && child.exitCode === null) {
@@ -456,6 +463,33 @@ export async function runPi(
         }
       }, 1000);
     };
+
+    // ── First-turn runaway watchdog (DL-20261023-405) ────────────────────────
+    //
+    // The idle watchdog asks "did we hear anything?"; this one asks "did the run
+    // DO anything?". Measured on the 2026-10-27 diagnosis: every failing lens ran
+    // glm-5.3-flash, whose timed-out attempts show turns=1, tools=0 and 1k-15k
+    // stream events. Activity never stopped, so the idle timer never fired, and
+    // the run burned the full wall clock producing no review. A first turn with
+    // no tool call past this cap is runaway generation, not a slow review; it is
+    // reported as `runaway` (a retryable class) instead of `timeout`.
+    const firstTurnTimeoutSeconds = Math.max(0, inputs.firstTurnTimeoutSeconds ?? 0);
+    const runawayWatchdogEnabled = firstTurnTimeoutSeconds > 0 && useJsonMode;
+    if (firstTurnTimeoutSeconds > 0 && !useJsonMode) {
+      console.warn(
+        "first-turn watchdog disabled: ELEK_PI_TEXT_MODE emits no incremental stream, " +
+          "so a tool call cannot be observed.",
+      );
+    }
+    if (runawayWatchdogEnabled) {
+      firstTurnTimer = setTimeout(() => {
+        if (sawToolCall || settled) return;
+        terminatePi(
+          `pi produced no tool call within ${firstTurnTimeoutSeconds}s of its first turn (runaway generation)`,
+          "runaway",
+        );
+      }, firstTurnTimeoutSeconds * 1000);
+    }
 
     const timeoutMs = inputs.runTimeoutSeconds * 1000;
     const timeoutTimer = setTimeout(
@@ -616,6 +650,9 @@ export async function runPi(
 
         case "tool_execution_start": {
           const toolName: string = event.toolName || "unknown";
+          // The run is doing work: the first-turn runaway watchdog can stand down.
+          sawToolCall = true;
+          clearFirstTurnTimer();
           toolCount++;
           // Render bash commands as `bash(<cmd>)` for nicer progress lines.
           const detail =

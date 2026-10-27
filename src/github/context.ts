@@ -312,6 +312,7 @@ export function parseInputs(): ActionInputs {
     openRouterReasoningModes: parseReasoningModes(core.getInput("openrouter_model_reasoning_modes")),
     reasoningMaxTokens: parseReasoningMaxTokensInput(core.getInput("reasoning_max_tokens")),
     stallTimeoutSeconds: parseStallTimeoutSecondsInput(core.getInput("stall_timeout_seconds")),
+    firstTurnTimeoutSeconds: parseStallTimeoutSecondsInput(core.getInput("first_turn_timeout_seconds")),
     tools: core.getInput("tools") || "",
     configPath: core.getInput("config_path") || ".elek.yml",
     baseBranch: core.getInput("base_branch") || undefined,

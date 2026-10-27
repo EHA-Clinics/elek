@@ -101,6 +101,35 @@ function attemptMetric(params: {
   };
 }
 
+/**
+ * A lens that could not use its tools has not verified anything.
+ *
+ * Measured on eha-care-infra #1373 (council run 40581571656): the tests lens's
+ * tool access failed, it produced no verifiable findings, and the council still
+ * reported COMPLETE/SUCCESS with zero findings — a degraded lens counted as a
+ * clean pass. Every tool call in that run ended with isError, which elek already
+ * sees on the stream; it just never reached the verdict.
+ *
+ * The rule is narrow on purpose: it fires only when calls > 0 and ALL of them
+ * errored. A run with NO tool calls is left alone, because the review prompt
+ * explicitly allows a self-contained change to need none (pi.ts:46).
+ */
+function applyToolAccessVerdict(result: PiRunResult): PiRunResult {
+  const calls = result.toolCalls ?? 0;
+  const errors = result.toolErrors ?? 0;
+  if (result.conclusion === "success" && calls > 0 && errors === calls) {
+    return {
+      ...result,
+      conclusion: "failure",
+      failureClass: "tool_access",
+      output:
+        `${result.output}\n\n[eval] every tool call in this run failed (${errors}/${calls}); ` +
+        "a review with no tool evidence is not a clean pass.",
+    };
+  }
+  return result;
+}
+
 export async function executeLensWithRetry(params: {
   job: ReviewJob;
   /** Reviewer models a failover may move to. Excludes the advisor by construction. */
@@ -133,7 +162,7 @@ export async function executeLensWithRetry(params: {
     );
   };
 
-  let lensResult = await deps.runAttempt(activeJob, `lens-${job.lens.id}`);
+  let lensResult = applyToolAccessVerdict(await deps.runAttempt(activeJob, `lens-${job.lens.id}`));
   record(lensResult, activeJob, false);
 
   const decision = resolveLensRetry({
@@ -168,7 +197,7 @@ export async function executeLensWithRetry(params: {
     );
     const overrides: LensAttemptOverrides | undefined =
       decision.runTimeoutSeconds !== undefined ? { runTimeoutSeconds: decision.runTimeoutSeconds } : undefined;
-    const retryResult = await deps.runAttempt(activeJob, `lens-${job.lens.id}-retry`, overrides);
+    const retryResult = applyToolAccessVerdict(await deps.runAttempt(activeJob, `lens-${job.lens.id}-retry`, overrides));
     record(retryResult, activeJob, decision.failover, overrides?.runTimeoutSeconds);
     log(
       retryResult.conclusion === "success"

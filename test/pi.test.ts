@@ -558,8 +558,20 @@ describe("runPi stream-idle watchdog", () => {
       "emit({ type: 'turn_start' });",
       "process.exit(1);",
     ]);
+    const created: unknown[] = [];
+    const cleared: unknown[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    globalThis.setTimeout = ((fn: TimerHandler, ms?: number, ...args: unknown[]) => {
+      const handle = (realSetTimeout as typeof setTimeout)(fn as () => void, ms, ...args);
+      if (ms === 300_000) created.push(handle);
+      return handle;
+    }) as unknown as typeof setTimeout;
+    globalThis.clearTimeout = ((handle?: unknown) => {
+      cleared.push(handle);
+      return (realClearTimeout as typeof clearTimeout)(handle as Parameters<typeof clearTimeout>[0]);
+    }) as typeof clearTimeout;
     try {
-      const started = Date.now();
       const result = await runPi(
         "review",
         { ...baseInputs, runTimeoutSeconds: 60, stallTimeoutSeconds: 0, firstTurnTimeoutSeconds: 300 },
@@ -568,11 +580,15 @@ describe("runPi stream-idle watchdog", () => {
         { promptName: "runaway-early-exit" },
       );
 
-      // If the timer were left armed, this process would sit on a 300s handle.
-      expect(Date.now() - started).toBeLessThan(5_000);
       expect(result.conclusion).toBe("failure");
       expect(result.failureClass).not.toBe("runaway");
+      // The 300s handle must have been CREATED and then CLEARED on the settle
+      // path; a leaked ref'd handle would keep the process alive for 5 minutes.
+      expect(created).toHaveLength(1);
+      expect(cleared).toContain(created[0]);
     } finally {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
       cleanup();
     }
   }, 20_000);
@@ -610,7 +626,9 @@ describe("runPi stream-idle watchdog", () => {
       "emit({ type: 'turn_start' });",
       "setTimeout(() => emit({ type: 'tool_execution_start', toolName: 'read', toolCallId: '1' }), 300);",
       "setTimeout(() => emit({ type: 'tool_execution_end', toolName: 'read', toolCallId: '1', isError: false }), 500);",
-      `setTimeout(() => { emit(${okAssistant}); process.exit(0); }, 900);`,
+      // OUTLIVE the 2s cap: if the first tool call did not disarm the watchdog,
+      // this run is killed and the assertion below fails.
+      `setTimeout(() => { emit(${okAssistant}); process.exit(0); }, 2600);`,
     ]);
     try {
       const result = await runPi(

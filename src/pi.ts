@@ -467,7 +467,7 @@ export async function runPi(
     // ── First-turn runaway watchdog (DL-20261023-405) ────────────────────────
     //
     // The idle watchdog asks "did we hear anything?"; this one asks "did the run
-    // DO anything?". Measured on the 2026-10-27 diagnosis: every failing lens ran
+    // DO anything?". Measured on the 2026-10-27 diagnosis — every failing lens ran
     // glm-5.3-flash, whose timed-out attempts show turns=1, tools=0 and 1k-15k
     // stream events. Activity never stopped, so the idle timer never fired, and
     // the run burned the full wall clock producing no review. A first turn with

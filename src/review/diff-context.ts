@@ -26,7 +26,21 @@ export interface PromptPackingOptions {
    * changing the default for anyone else.
    */
   productionExtensions?: readonly string[];
+  /**
+   * A prompt tier to serve BEFORE production source. Absent (the default) keeps
+   * the source-first order byte-identical. The Tests lens sets `"tests"`: under
+   * one shared source-first packing, eha_care #5129 (council run 40613682758, 90
+   * files, a 350k-char diff over a ~200k budget) cut the Tests lens's own 43 test
+   * files to fragments, so the one lens whose subject is the tests saw least of
+   * them. Every other tier keeps its relative order.
+   */
+  leadTier?: PromptLeadTier;
 }
+
+export type PromptLeadTier = "tests";
+
+/** The `promptPriority` tier each lead tier name selects. */
+const LEAD_TIER_PRIORITY: Record<PromptLeadTier, number> = { tests: 1 };
 
 const MIN_FILE_SLICE_CHARS = 700;
 const MAX_FILE_SLICE_CHARS = 64_000;
@@ -215,7 +229,8 @@ export function formatChangedFilesForPrompt(
     return fullDiffWithOverview;
   }
 
-  const sorted = [...files].sort(comparePromptPriorityWith(options.productionExtensions));
+  const lead = options.leadTier === undefined ? undefined : LEAD_TIER_PRIORITY[options.leadTier];
+  const sorted = [...files].sort(comparePromptPriorityWith(options.productionExtensions, lead));
   const truncatedNote = `# ... diff truncated by file for prompt budget; reviewable diff was ${keptDiff.length.toLocaleString("en-US")} characters.`;
   // Every character outside the per-file blocks is a known string, so the
   // patch budget is computed exactly instead of guessed. The omitted note is
@@ -224,7 +239,7 @@ export function formatChangedFilesForPrompt(
     [overviewText, ...SLICE_INTRO, "", truncatedNote].join("\n").length +
     (omittedCount > 0 ? omittedFilesNote(omittedCount).length + 2 : 0);
 
-  const order = packingOrder(sorted, options.productionExtensions);
+  const order = packingOrder(sorted, options.productionExtensions, lead);
   // An overview that leaves no room for even the first file's viable slice is
   // bounded, so overview metadata never crowds out all diff evidence.
   const firstBlockChars = minimumBlockChars(order[0].file);
@@ -292,9 +307,10 @@ interface PackingEntry {
 function packingOrder(
   sorted: readonly ChangedFilePatch[],
   extraExtensions: readonly string[] | undefined,
+  lead?: number,
 ): PackingEntry[] {
   return sorted
-    .map((file, index) => ({ file, index, tier: packingTier(file, extraExtensions) }))
+    .map((file, index) => ({ file, index, tier: ledRank(packingTier(file, extraExtensions), lead) }))
     .sort((a, b) => a.tier - b.tier || Number(a.file.status === "deleted") - Number(b.file.status === "deleted") || a.index - b.index);
 }
 
@@ -434,11 +450,17 @@ function fileOverviewLine(file: ChangedFilePatch): string {
   return `# - ${file.path} (${file.status}, +${file.additions}/-${file.deletions})`;
 }
 
+/** A tier's rank once `lead` (if any) is moved ahead of every other tier. */
+function ledRank(tier: number, lead: number | undefined): number {
+  return lead !== undefined && tier === lead ? -1 : tier;
+}
+
 function comparePromptPriorityWith(
   extraExtensions: readonly string[] | undefined,
+  lead?: number,
 ): (a: ChangedFilePatch, b: ChangedFilePatch) => number {
   return (a, b) => {
-    const score = promptPriority(a, extraExtensions) - promptPriority(b, extraExtensions);
+    const score = ledRank(promptPriority(a, extraExtensions), lead) - ledRank(promptPriority(b, extraExtensions), lead);
     if (score !== 0) return score;
     const churn = (b.additions + b.deletions) - (a.additions + a.deletions);
     if (churn !== 0) return churn;

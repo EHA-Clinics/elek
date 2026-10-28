@@ -392,6 +392,36 @@ describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
     expectBackstopUnused(out, budget, diff);
   });
 
+  it("serves the tests tier first for a tests-led prompt (eha_care #5129 shape)", () => {
+    // Council run 40613682758: 90 files, a 350k-char diff over a ~200k budget, and
+    // the Tests lens got the same source-first packing as Risk, so its own 43 test
+    // files were cut to fragments. Led by the tests tier, every test file is whole
+    // and source still gets the remainder.
+    const sources = Array.from({ length: 40 }, (_, i) => sizedDiff(`src/mod-${String(i).padStart(2, "0")}.ts`, 6_000));
+    const tests = Array.from({ length: 40 }, (_, i) => sizedDiff(`src/mod-${String(i).padStart(2, "0")}.test.ts`, 3_000));
+    const diff = [...sources, ...tests].join("\n");
+    const budget = 200_000;
+    const testPaths = tests.map((_, i) => `src/mod-${String(i).padStart(2, "0")}.test.ts`);
+    const wholeTests = (out: string) => testPaths.filter((path) => out.includes(patchOf(diff, path))).length;
+
+    const sourceFirst = formatChangedFilesForPrompt(diff, budget);
+    const testsFirst = formatChangedFilesForPrompt(diff, budget, { leadTier: "tests" });
+
+    expect(wholeTests(sourceFirst)).toBeLessThan(testPaths.length);
+    expect(wholeTests(testsFirst)).toBe(testPaths.length);
+    // Source is not dropped: every source file still gets a viable slice.
+    for (let i = 0; i < sources.length; i++) {
+      const path = `src/mod-${String(i).padStart(2, "0")}.ts`;
+      expect(shownChars(testsFirst, patchOf(diff, path))).toBeGreaterThanOrEqual(500);
+    }
+    expectBackstopUnused(testsFirst, budget, diff);
+  });
+
+  it("leaves the default packing byte-identical when no tier leads", () => {
+    const diff = [sizedDiff("src/a.ts", 9_000), sizedDiff("src/a.test.ts", 9_000), sizedDiff("docs/a.md", 9_000)].join("\n");
+    expect(formatChangedFilesForPrompt(diff, 12_000, { leadTier: undefined })).toBe(formatChangedFilesForPrompt(diff, 12_000));
+  });
+
   it("fills tiers in order: every source file WHOLE, then tests ahead of docs", () => {
     const diff = [
       sizedDiff("docs/a.md", 10_000),

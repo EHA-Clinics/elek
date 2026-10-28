@@ -4,7 +4,7 @@ import { mcpToolGuidance } from "../github/mcp-guidance.js";
 import { findingValidationBullets, reviewContractBullets, reviewFindingTemplate } from "./contract.js";
 import { formatConfigPromptBlock, normalizeReviewStrategy, type ElekConfig } from "../config.js";
 import { aggregateCosts, formatUsd, type ReviewCost } from "./cost.js";
-import { diffPromptBudgetChars, formatChangedFilesForPrompt } from "./diff-context.js";
+import { diffPromptBudgetChars, formatChangedFilesForPrompt, type PromptLeadTier } from "./diff-context.js";
 import {
   resolveSynthesisRetrySeconds,
   resolveTimeoutRetrySeconds,
@@ -935,6 +935,16 @@ export interface DiffPromptBudgetReport {
   diffPromptBudgetChars: number;
   /** exclude_paths in effect for this prompt. */
   excludePaths: string[];
+  /** The tier packed ahead of production source, when one was; absent means source-first. */
+  leadTier?: PromptLeadTier;
+}
+
+/**
+ * The prompt tier a lens's packing leads with. Only the Tests lens differs: its
+ * subject is the test files, which source-first packing serves second.
+ */
+export function lensLeadTier(lensId: string | undefined): PromptLeadTier | undefined {
+  return lensId === "tests" ? "tests" : undefined;
 }
 
 function changedFilesBlock(
@@ -944,6 +954,7 @@ function changedFilesBlock(
   excludePaths: readonly string[] | undefined,
   productionExtensions: readonly string[] | undefined,
   onBudget?: (report: DiffPromptBudgetReport) => void,
+  leadTier?: PromptLeadTier,
 ): string {
   const budget = diffPromptBudgetChars(modelLabel, reservedChars);
   onBudget?.({
@@ -951,8 +962,9 @@ function changedFilesBlock(
     reservedChars,
     diffPromptBudgetChars: budget,
     excludePaths: [...(excludePaths ?? [])],
+    ...(leadTier ? { leadTier } : {}),
   });
-  return formatChangedFilesForPrompt(data.diff, budget, { excludePaths, productionExtensions });
+  return formatChangedFilesForPrompt(data.diff, budget, { excludePaths, productionExtensions, leadTier });
 }
 
 export function buildLensPrompt(params: {
@@ -1030,7 +1042,15 @@ export function buildLensPrompt(params: {
     ``,
     `<changed_files>`,
     "```diff",
-    changedFilesBlock(data, modelLabel, reservedChars, repoConfig?.excludePaths, repoConfig?.prioritySourceExtensions, onBudget),
+    changedFilesBlock(
+      data,
+      modelLabel,
+      reservedChars,
+      repoConfig?.excludePaths,
+      repoConfig?.prioritySourceExtensions,
+      onBudget,
+      lensLeadTier(lens.id),
+    ),
     "```",
     `</changed_files>`,
     ``,

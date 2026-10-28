@@ -409,6 +409,12 @@ describe("slice packing (EHAC-2844: source-first, max-min fair)", () => {
 
     expect(wholeTests(sourceFirst)).toBeLessThan(testPaths.length);
     expect(wholeTests(testsFirst)).toBe(testPaths.length);
+    // Emit order follows the lead too (cross-review d6d933fa, LOW): test blocks
+    // come before source blocks, and the default keeps source first.
+    // (A file the default omits has no block at all, so compare the FIRST block.)
+    const firstBlock = (out: string) => out.slice(out.indexOf("# Representative diff slices")).match(/\n# (src\/\S+) \(/)?.[1];
+    expect(firstBlock(testsFirst)).toMatch(/\.test\.ts$/);
+    expect(firstBlock(sourceFirst)).toMatch(/^src\/mod-\d+\.ts$/);
     // Source is not dropped: every source file still gets a viable slice.
     for (let i = 0; i < sources.length; i++) {
       const path = `src/mod-${String(i).padStart(2, "0")}.ts`;

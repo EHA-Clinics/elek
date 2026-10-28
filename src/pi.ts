@@ -37,6 +37,7 @@ import type {
   PiFailureClass,
   PiRunResult,
   PiTerminationReason,
+  PromptUsageTelemetry,
 } from "./types";
 import { estimateRunCost, modelLabelFor, resolveRates, type ReviewCost } from "./review/cost";
 
@@ -95,6 +96,9 @@ interface PiAssistantMessage {
 interface PiUsage {
   input?: number;
   output?: number;
+  /** pi-ai `Usage`: cached prompt tokens, reported separately from (and excluded from) `input`. */
+  cacheRead?: number;
+  cacheWrite?: number;
   inputTokens?: number;
   outputTokens?: number;
   promptTokens?: number;
@@ -388,6 +392,7 @@ export async function runPi(
   let toolCount = 0;
   let toolErrorCount = 0;
   let toolSuccessCount = 0;
+  let promptUsage: PromptUsageTelemetry | undefined;
   let turnCount = 0;
   let providerRetries = 0;
   let finalAssistant: PiAssistantMessage | undefined;
@@ -564,6 +569,7 @@ export async function runPi(
         toolCalls: toolCount,
         toolErrors: toolErrorCount,
         toolSuccesses: toolSuccessCount,
+        ...(promptUsage ? { promptUsage } : {}),
         ...(lastEventType ? { lastEventType } : {}),
       };
     };
@@ -697,6 +703,8 @@ export async function runPi(
           if (msg?.role === "assistant") {
             finalAssistant = msg;
             if (msg.errorMessage) lastErrorMessage = msg.errorMessage;
+            // Counted here, once per model call. agent_end repeats every message.
+            promptUsage = addPromptUsage(promptUsage, msg.usage);
           }
           break;
         }
@@ -958,6 +966,38 @@ function exactRunCostFromPi(
     estimated: true,
     modelLabel,
     source: rates.source,
+  };
+}
+
+/** Fold one assistant message's usage into the run's prompt-side totals. */
+function addPromptUsage(
+  totals: PromptUsageTelemetry | undefined,
+  usage: PiUsage | undefined,
+): PromptUsageTelemetry | undefined {
+  if (!usage) return totals;
+  const input = firstNonNegativeInteger(usage.input, usage.inputTokens, usage.promptTokens);
+  const output = firstNonNegativeInteger(usage.output, usage.outputTokens, usage.completionTokens);
+  const cacheRead = firstNonNegativeInteger(usage.cacheRead) ?? 0;
+  const cacheWrite = firstNonNegativeInteger(usage.cacheWrite) ?? 0;
+  if (input === undefined && output === undefined && cacheRead === 0 && cacheWrite === 0) return totals;
+  const prompt = (input ?? 0) + cacheRead + cacheWrite;
+  const base = totals ?? {
+    assistantMessages: 0,
+    firstTurnPromptTokens: prompt,
+    promptTokensTotal: 0,
+    inputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    outputTokens: 0,
+  };
+  return {
+    assistantMessages: base.assistantMessages + 1,
+    firstTurnPromptTokens: base.firstTurnPromptTokens,
+    promptTokensTotal: base.promptTokensTotal + prompt,
+    inputTokens: base.inputTokens + (input ?? 0),
+    cacheReadTokens: base.cacheReadTokens + cacheRead,
+    cacheWriteTokens: base.cacheWriteTokens + cacheWrite,
+    outputTokens: base.outputTokens + (output ?? 0),
   };
 }
 

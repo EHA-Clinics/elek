@@ -2,6 +2,7 @@ import type {
   GitHubEntityContext,
   PiFailureClass,
   PiRunResult,
+  PromptUsageTelemetry,
   ReviewedDiffProvenance,
 } from "../types.js";
 import type { CouncilPolicyResult } from "./council-policy.js";
@@ -25,6 +26,8 @@ export interface ReviewRunMetric {
   durationSeconds: number;
   inputTokens: number;
   outputTokens: number;
+  /** Prompt-side usage over every turn, cache included. `inputTokens` above is the final turn, net of cache. */
+  promptUsage?: PromptUsageTelemetry;
   costUsd: number;
   costEstimated: boolean;
   pricingSource: ReviewCost["source"];
@@ -118,6 +121,8 @@ export interface ReviewAttemptMetric {
   streamEventCount?: number;
   malformedLineCount?: number;
   lastEventType?: string;
+  /** Prompt-side usage over every turn, cache included. `inputTokens` above is the final turn, net of cache. */
+  promptUsage?: PromptUsageTelemetry;
   /**
    * The wall clock this attempt ran on when it was shortened: set only on a
    * `timeout` retry (ruling 4). Absent means the role's normal budget. Additive.
@@ -249,6 +254,7 @@ export function metricFromPiRun(
     durationSeconds: roundSeconds(result.durationSeconds),
     inputTokens: result.usage.inputTokens,
     outputTokens: result.usage.outputTokens,
+    ...(result.promptUsage ? { promptUsage: result.promptUsage } : {}),
     costUsd: roundUsd(result.costUsd),
     costEstimated: result.usage.estimated,
     pricingSource: result.usage.source,

@@ -1002,6 +1002,38 @@ describe("diff prompt budget reporting", () => {
     );
   });
 
+  it("packs the Tests lens tests-first and says so; other lenses stay source-first", () => {
+    // eha_care #5129 shape: more diff than budget, with test files behind source.
+    const filePatch = (path: string, chars: number) =>
+      // The last line is a unique end marker: a slice cuts the tail, so it reaches
+      // the prompt only when the whole patch does.
+      [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, "@@ -1,1 +1,3 @@", ` ctx`, `+${"y".repeat(chars)}`, `+END ${path}`].join("\n");
+    const testPaths = Array.from({ length: 30 }, (_, i) => `src/m${i}.test.ts`);
+    const diff = [
+      ...Array.from({ length: 30 }, (_, i) => filePatch(`src/m${i}.ts`, 12_000)),
+      ...testPaths.map((path) => filePatch(path, 5_000)),
+    ].join("\n");
+    const data = { ...dataFixture, diff };
+    const run = (lensId: string) => {
+      const reports: Array<{ leadTier?: string }> = [];
+      const prompt = buildLensPrompt({
+        data,
+        userRequest: "",
+        lens: { id: lensId, title: lensId, focus: "f" },
+        modelLabel: "deepseek/deepseek-v4-pro",
+        repoConfig: { ignorePaths: [], excludePaths: [], prioritySourceExtensions: [], instructions: [] },
+        onBudget: (report) => reports.push(report),
+      });
+      const whole = testPaths.filter((path) => prompt.includes(`+END ${path}\n`)).length;
+      return { whole, leadTier: reports[0]?.leadTier };
+    };
+
+    expect(run("tests")).toEqual({ whole: testPaths.length, leadTier: "tests" });
+    const risk = run("risk");
+    expect(risk.leadTier).toBeUndefined();
+    expect(risk.whole).toBeLessThan(testPaths.length);
+  });
+
   it("reports a larger budget for a model with a larger input window", () => {
     const seen: number[] = [];
     for (const modelLabel of ["deepseek/deepseek-v4-pro", "moonshotai/kimi-k3"]) {

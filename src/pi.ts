@@ -715,6 +715,11 @@ export async function runPi(
             (m: any) => m?.role === "assistant",
           );
           if (messages.length > 0) {
+            // A stream that reported usage only here (no assistant message_end) is
+            // folded once; otherwise message_end already counted every message.
+            if (promptUsage === undefined) {
+              for (const m of messages) promptUsage = addPromptUsage(promptUsage, m.usage);
+            }
             finalAssistant = messages[messages.length - 1];
             if (finalAssistant?.errorMessage) lastErrorMessage = finalAssistant.errorMessage;
           }
@@ -979,8 +984,11 @@ function addPromptUsage(
   const output = firstNonNegativeInteger(usage.output, usage.outputTokens, usage.completionTokens);
   const cacheRead = firstNonNegativeInteger(usage.cacheRead) ?? 0;
   const cacheWrite = firstNonNegativeInteger(usage.cacheWrite) ?? 0;
-  if (input === undefined && output === undefined && cacheRead === 0 && cacheWrite === 0) return totals;
   const prompt = (input ?? 0) + cacheRead + cacheWrite;
+  // An all-zero usage object (an errored or aborted call) is not a model call that
+  // was sent anything; counting it would emit all-zero telemetry, or latch the first
+  // turn's prompt at 0 ahead of the call that actually carried the prompt.
+  if (prompt === 0 && (output ?? 0) === 0) return totals;
   const base = totals ?? {
     assistantMessages: 0,
     firstTurnPromptTokens: prompt,

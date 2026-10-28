@@ -260,6 +260,20 @@ describe("metricFromPiRun — additive spread, exactly like failureClass", () =>
     expect(m.nativeTokensReasoning).toBe(0);
   });
 
+  it("carries summed prompt usage onto the run metric, and omits it when absent", () => {
+    const promptUsage = {
+      assistantMessages: 2,
+      firstTurnPromptTokens: 30_000,
+      promptTokensTotal: 60_500,
+      inputTokens: 30_500,
+      cacheReadTokens: 30_000,
+      cacheWriteTokens: 0,
+      outputTokens: 1_000,
+    };
+    expect(metricFromPiRun({ ...base, promptUsage }, "reviewer").promptUsage).toEqual(promptUsage);
+    expect("promptUsage" in metricFromPiRun(base, "reviewer")).toBe(false);
+  });
+
   it("carries an honest null through, rather than dropping the field", () => {
     const m = metricFromPiRun({ ...base, servingProvider: null, quantization: null }, "reviewer");
     expect("servingProvider" in m).toBe(true);

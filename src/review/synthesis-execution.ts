@@ -90,6 +90,7 @@ function attemptMetric(params: {
     streamEventCount: result.streamEventCount ?? 0,
     malformedLineCount: result.malformedLineCount ?? 0,
     ...(result.lastEventType ? { lastEventType: result.lastEventType } : {}),
+    ...(result.promptUsage ? { promptUsage: result.promptUsage } : {}),
     // Additive, and only on the failover, whose budget comes from the live clock.
     ...(params.runTimeoutSeconds !== undefined ? { runTimeoutSeconds: params.runTimeoutSeconds } : {}),
   };

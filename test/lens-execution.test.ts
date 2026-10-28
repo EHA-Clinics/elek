@@ -104,6 +104,22 @@ describe("executeLensWithRetry", () => {
     expect(out.lensResult.conclusion).toBe("success");
   });
 
+  it("carries the summed prompt usage onto the attempt record", async () => {
+    const promptUsage = {
+      assistantMessages: 3,
+      firstTurnPromptTokens: 65_000,
+      promptTokensTotal: 196_896,
+      inputTokens: 61_896,
+      cacheReadTokens: 130_000,
+      cacheWriteTokens: 5_000,
+      outputTokens: 3_100,
+    };
+    const rec = recorder([piResult({ modelLabel: PRO.label, promptUsage })]);
+    const out = await executeLensWithRetry({ job: job(PRO), roster: ROSTER, deps: { runAttempt: rec.runAttempt } });
+
+    expect(out.attemptMetrics[0].promptUsage).toEqual(promptUsage);
+  });
+
   it("keeps a lens green when SOME tool calls succeeded", async () => {
     const partial = piResult({ modelLabel: PRO.label, toolCalls: 3, toolErrors: 1, toolSuccesses: 2 });
     const rec = recorder([partial]);

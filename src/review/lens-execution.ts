@@ -95,6 +95,7 @@ function attemptMetric(params: {
     streamEventCount: result.streamEventCount ?? 0,
     malformedLineCount: result.malformedLineCount ?? 0,
     ...(result.lastEventType ? { lastEventType: result.lastEventType } : {}),
+    ...(result.promptUsage ? { promptUsage: result.promptUsage } : {}),
     ...(params.promptBudget ? { promptBudget: params.promptBudget } : {}),
     // Additive, and only on an attempt that ran on an overridden (shorter) budget.
     ...(params.runTimeoutSeconds !== undefined ? { runTimeoutSeconds: params.runTimeoutSeconds } : {}),

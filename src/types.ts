@@ -261,6 +261,30 @@ export interface PiStreamTelemetry {
   toolErrors?: number;
   /** Count of tool calls that ended WITHOUT isError (unclosed calls count for none). */
   toolSuccesses?: number;
+  /** Prompt-side usage over EVERY assistant turn; absent when no turn reported usage. */
+  promptUsage?: PromptUsageTelemetry;
+}
+
+/**
+ * What the model was actually sent, summed across turns.
+ *
+ * `usage.inputTokens` on a run is the FINAL turn's `input`, and pi-ai reports that
+ * net of cache (`prompt_tokens - cached_tokens - cache_write_tokens`), so a lens
+ * handed a ~198k-char prompt can show 696 there (eha_care #5129, run 40613682758).
+ * That figure prices the last call; it says nothing about what the lens saw. These
+ * fields do: a prompt token is `input + cacheRead + cacheWrite` for one call.
+ */
+export interface PromptUsageTelemetry {
+  /** Assistant messages that reported usage (one per model call). */
+  assistantMessages: number;
+  /** Prompt tokens of the first call: the packed prompt before any tool output. */
+  firstTurnPromptTokens: number;
+  /** Prompt tokens summed over every call, cache included. */
+  promptTokensTotal: number;
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
 }
 
 export interface PiRunResult extends PiStreamTelemetry {

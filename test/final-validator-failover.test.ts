@@ -136,6 +136,22 @@ describe("executeSynthesisWithFailover (EHAC-3622)", () => {
     },
   );
 
+  it("carries summed prompt usage onto the synthesis attempt record, and omits it when absent", async () => {
+    const promptUsage = {
+      assistantMessages: 1,
+      firstTurnPromptTokens: 52_000,
+      promptTokensTotal: 52_000,
+      inputTokens: 52_000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      outputTokens: 2_400,
+    };
+    const withUsage = await synthesize({ results: [piResult(FLASH.label, { promptUsage })] });
+    expect(withUsage.out.attemptMetrics[0].promptUsage).toEqual(promptUsage);
+    const without = await synthesize({ results: [piResult(FLASH.label)] });
+    expect("promptUsage" in without.out.attemptMetrics[0]).toBe(false);
+  });
+
   it("both attempts failing: the failover's result is decisive, both are recorded, and there is no third", async () => {
     const { run, out } = await synthesize({
       results: [fail(FLASH.label, "stall"), fail(PRO.label, "stall"), piResult(FLASH.label)],

@@ -413,8 +413,11 @@ runs:
     - name: Run pi Action
       id: run
       shell: bash
+      # --tsconfig: this step's working directory is the caller's workspace, which may be a PR
+      # checkout, and tsx otherwise reads tsconfig.json from there; a planted `paths` alias
+      # would swap elek's own imports for workspace code (test/action-tsconfig.test.ts).
       run: |
-        tsx "$GITHUB_ACTION_PATH/src/entrypoints/run.ts"
+        tsx --tsconfig "$GITHUB_ACTION_PATH/tsconfig.json" "$GITHUB_ACTION_PATH/src/entrypoints/run.ts"
       env:
         # ── Trigger ──
         INPUT_TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}

@@ -640,6 +640,124 @@ describe("runPi stream-idle watchdog", () => {
     }
   }, 20_000);
 
+  it("sums prompt usage, cache included, over every assistant turn", async () => {
+    // eha_care #5129 (council run 40613682758): the record reported 696 and 3,056
+    // input tokens for lenses given a ~198k-char prompt. That number is the FINAL
+    // turn's `usage.input`, which pi-ai reports net of cache reads and writes, so it
+    // cannot say what a lens was shown. agent_end repeats the messages and must not
+    // be counted a second time.
+    const turn = (input: number, cacheRead: number, cacheWrite: number, output: number, text: string) =>
+      `{ role: 'assistant', content: [{ type: 'text', text: '${text}' }], stopReason: 'stop', ` +
+      `usage: { input: ${input}, output: ${output}, cacheRead: ${cacheRead}, cacheWrite: ${cacheWrite} } }`;
+    const t1 = turn(60_000, 0, 5_000, 900, "t1");
+    const t2 = turn(1_200, 64_000, 0, 700, "t2");
+    const t3 = turn(696, 66_000, 0, 1_500, "review body");
+    const { cleanup } = fakePi("prompt-usage", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      `emit({ type: 'message_end', message: ${t1} });`,
+      `emit({ type: 'message_end', message: ${t2} });`,
+      `emit({ type: 'message_end', message: ${t3} });`,
+      `emit({ type: 'agent_end', messages: [${t1}, ${t2}, ${t3}] }); process.exit(0);`,
+    ]);
+    try {
+      const result = await runPi("review", { ...baseInputs, runTimeoutSeconds: 60 }, undefined, false, { promptName: "prompt-usage" });
+      expect(result.promptUsage).toEqual({
+        assistantMessages: 3,
+        firstTurnPromptTokens: 65_000,
+        promptTokensTotal: 65_000 + 65_200 + 66_696,
+        inputTokens: 61_896,
+        cacheReadTokens: 130_000,
+        cacheWriteTokens: 5_000,
+        outputTokens: 3_100,
+      });
+      // The cost fields keep their existing final-turn meaning in this change.
+      expect(result.usage.inputTokens).toBe(696);
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("skips all-zero usage: an errored call neither counts nor latches the first turn at 0", async () => {
+    const msg = (usage: string, text: string, stop = "stop") =>
+      `{ role: 'assistant', content: [{ type: 'text', text: '${text}' }], stopReason: '${stop}', usage: ${usage} }`;
+    const zero = msg("{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }", "", "error");
+    const real = msg("{ input: 40000, output: 800, cacheRead: 0, cacheWrite: 0 }", "review body");
+    const { cleanup } = fakePi("prompt-usage-zero", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      `emit({ type: 'message_end', message: ${zero} });`,
+      `emit({ type: 'message_end', message: ${real} });`,
+      `emit({ type: 'agent_end', messages: [${zero}, ${real}] }); process.exit(0);`,
+    ]);
+    try {
+      const result = await runPi("review", { ...baseInputs, runTimeoutSeconds: 60 }, undefined, false, { promptName: "prompt-usage-zero" });
+      expect(result.promptUsage?.assistantMessages).toBe(1);
+      expect(result.promptUsage?.firstTurnPromptTokens).toBe(40_000);
+      expect(result.promptUsage?.promptTokensTotal).toBe(40_000);
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("omits prompt usage when the only usage reported is all zero", async () => {
+    const { cleanup } = fakePi("prompt-usage-allzero", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      "emit({ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text: 'review body' }], stopReason: 'stop', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] }); process.exit(0);",
+    ]);
+    try {
+      const result = await runPi("review", { ...baseInputs, runTimeoutSeconds: 60 }, undefined, false, { promptName: "prompt-usage-allzero" });
+      expect(result.promptUsage).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("folds agent_end usage once when the stream sent no assistant message_end", async () => {
+    const { cleanup } = fakePi("prompt-usage-agent-end", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      "emit({ type: 'agent_end', messages: [" +
+        "{ role: 'assistant', content: [{ type: 'text', text: 'a' }], stopReason: 'toolUse', usage: { input: 30000, output: 100, cacheRead: 0, cacheWrite: 0 } }, " +
+        "{ role: 'assistant', content: [{ type: 'text', text: 'review body' }], stopReason: 'stop', usage: { input: 500, output: 900, cacheRead: 30000, cacheWrite: 0 } }" +
+        "] }); process.exit(0);",
+    ]);
+    try {
+      const result = await runPi("review", { ...baseInputs, runTimeoutSeconds: 60 }, undefined, false, { promptName: "prompt-usage-agent-end" });
+      expect(result.promptUsage).toEqual({
+        assistantMessages: 2,
+        firstTurnPromptTokens: 30_000,
+        promptTokensTotal: 60_500,
+        inputTokens: 30_500,
+        cacheReadTokens: 30_000,
+        cacheWriteTokens: 0,
+        outputTokens: 1_000,
+      });
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
+  it("omits prompt usage when no assistant turn reported usage", async () => {
+    const { cleanup } = fakePi("prompt-usage-none", [
+      "#!/usr/bin/env node",
+      "const emit = (o) => console.log(JSON.stringify(o));",
+      "emit({ type: 'session', id: 's' });",
+      `emit(${okAssistant}); process.exit(0);`,
+    ]);
+    try {
+      const result = await runPi("review", { ...baseInputs, runTimeoutSeconds: 60 }, undefined, false, { promptName: "prompt-usage-none" });
+      expect(result.promptUsage).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  }, 20_000);
+
   it("does not report runaway when a tool call starts before the cap", async () => {
     const { cleanup } = fakePi("runaway-tool-call", [
       "#!/usr/bin/env node",
